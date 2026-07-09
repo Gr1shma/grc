@@ -6,6 +6,7 @@ use anyhow::{Context, Result, anyhow};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -22,7 +23,12 @@ fn main() -> Result<()> {
 
 fn determine_todo_path(args: &[String]) -> Result<PathBuf> {
     if args.len() > 1 {
-        Ok(PathBuf::from(&args[1]))
+        let first_arg = &args[1];
+        if first_arg == "-h" || first_arg == "--help" {
+            print_help();
+            process::exit(0);
+        }
+        Ok(PathBuf::from(first_arg))
     } else {
         resolve_todo_path()
     }
@@ -73,6 +79,29 @@ fn ensure_todo_file_exists(path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn print_help() {
+    println!(
+        r#"grc - A terminal-based todo manager backed by a plain Markdown file.
+
+USAGE:
+    grc [FLAGS] [PATH]
+
+FLAGS:
+    -h, --help       Prints help information
+
+ARGS:
+    <PATH>           Path to a specific todo Markdown file [default: ~/.todo.md]
+
+ENVIRONMENT VARIABLES:
+    GRC_TODO_PATH    Override the default todo file path (alternative to passing PATH)
+
+EXAMPLES:
+    grc                         Open default file (~/.todo.md)
+    grc /path/to/todo.md        Open a specific todo file
+    GRC_TODO_PATH=todo.md grc   Open file via environment variable"#
+    );
 }
 
 #[cfg(test)]
