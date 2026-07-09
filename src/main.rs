@@ -8,8 +8,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() -> Result<()> {
-    let todo_path =
-        resolve_todo_path().context("Failed to determine the path for the todo Markdown file.")?;
+    let args: Vec<String> = env::args().collect();
+    let todo_path = determine_todo_path(&args)
+        .context("Failed to determine the path for the todo Markdown file.")?;
 
     ensure_todo_file_exists(&todo_path).context("Failed to initialize the todo storage file.")?;
 
@@ -17,6 +18,14 @@ fn main() -> Result<()> {
         .context("Site of Grace TUI encountered an unrecoverable runtime error.")?;
 
     Ok(())
+}
+
+fn determine_todo_path(args: &[String]) -> Result<PathBuf> {
+    if args.len() > 1 {
+        Ok(PathBuf::from(&args[1]))
+    } else {
+        resolve_todo_path()
+    }
 }
 
 fn resolve_todo_path() -> Result<PathBuf> {
@@ -83,6 +92,20 @@ mod tests {
         };
         let result = resolve_todo_path_with_env(mock_env).unwrap();
         assert_eq!(result, PathBuf::from("/tmp/custom_grc_test.md"));
+    }
+
+    #[test]
+    fn determine_todo_path_uses_first_arg() {
+        let args = vec!["grc".to_string(), "my_todo.md".to_string()];
+        let path = determine_todo_path(&args).unwrap();
+        assert_eq!(path, PathBuf::from("my_todo.md"));
+    }
+
+    #[test]
+    fn determine_todo_path_falls_back_when_no_arg() {
+        let args = vec!["grc".to_string()];
+        let path = determine_todo_path(&args);
+        assert!(path.is_ok());
     }
 
     #[test]
