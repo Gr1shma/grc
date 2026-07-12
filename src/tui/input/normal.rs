@@ -151,7 +151,10 @@ pub fn handle_normal(
             }
 
             KeyCode::Char('p') => {
-                paste_clipboard(app, todo_list, path)?;
+                paste_clipboard(app, todo_list, path, false)?;
+            }
+            KeyCode::Char('P') => {
+                paste_clipboard(app, todo_list, path, true)?;
             }
 
             KeyCode::Char('G') => {
@@ -269,7 +272,10 @@ pub fn handle_normal(
             }
 
             KeyCode::Char('p') => {
-                paste_clipboard(app, todo_list, path)?;
+                paste_clipboard(app, todo_list, path, false)?;
+            }
+            KeyCode::Char('P') => {
+                paste_clipboard(app, todo_list, path, true)?;
             }
 
             KeyCode::Char('G') => {
@@ -395,7 +401,12 @@ pub(crate) fn yank_tree_node(app: &mut AppState, todo_list: &TodoList) -> Result
     Ok(())
 }
 
-pub(crate) fn paste_clipboard(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+pub(crate) fn paste_clipboard(
+    app: &mut AppState,
+    todo_list: &mut TodoList,
+    path: &Path,
+    above: bool,
+) -> Result<()> {
     let clip = match &app.clipboard {
         Some(item) => item.clone(),
         None => return Ok(()),
@@ -408,63 +419,70 @@ pub(crate) fn paste_clipboard(app: &mut AppState, todo_list: &mut TodoList, path
                 match node {
                     TreeNode::Section(s) => {
                         if s < todo_list.sections.len() {
-                            if app.focus == Focus::Right {
+                            let ins_idx = if app.focus == Focus::Right {
                                 let cur = app.right_state.selected().unwrap_or(0);
                                 if refs.is_empty() {
-                                    todo_list.sections[s].tasks.push(task);
-                                    app.right_state.select(Some(0));
-                                } else {
-                                    let mut ins_idx = todo_list.sections[s].tasks.len();
-                                    if cur < refs.len() {
-                                        match refs[cur] {
-                                            TaskRef::SectionTask { task_idx, .. } => {
-                                                ins_idx = task_idx + 1;
-                                            }
-                                            TaskRef::SubsectionTask { .. } => {
-                                                ins_idx = todo_list.sections[s].tasks.len();
-                                            }
+                                    0
+                                } else if cur < refs.len() {
+                                    match refs[cur] {
+                                        TaskRef::SectionTask { task_idx, .. } => {
+                                            if above { task_idx } else { task_idx + 1 }
+                                        }
+                                        TaskRef::SubsectionTask { .. } => {
+                                            if above { 0 } else { todo_list.sections[s].tasks.len() }
                                         }
                                     }
-                                    todo_list.sections[s].tasks.insert(ins_idx, task);
-                                    app.right_state.select(Some(ins_idx));
+                                } else {
+                                    todo_list.sections[s].tasks.len()
                                 }
+                            } else if above {
+                                0
                             } else {
-                                todo_list.sections[s].tasks.push(task);
-                                app.right_state
-                                    .select(Some(todo_list.sections[s].tasks.len() - 1));
-                            }
+                                todo_list.sections[s].tasks.len()
+                            };
+                            todo_list.sections[s].tasks.insert(ins_idx, task);
                             write_file(path, todo_list)?;
+                            if app.focus == Focus::Right {
+                                app.right_state.select(Some(ins_idx));
+                            }
                         }
                     }
                     TreeNode::Subsection(s, sb) => {
                         if s < todo_list.sections.len()
                             && sb < todo_list.sections[s].subsections.len()
                         {
-                            if app.focus == Focus::Right {
+                            let ins_idx = if app.focus == Focus::Right {
                                 let cur = app.right_state.selected().unwrap_or(0);
                                 if refs.is_empty() {
-                                    todo_list.sections[s].subsections[sb].tasks.push(task);
-                                    app.right_state.select(Some(0));
-                                } else {
-                                    let mut ins_idx =
-                                        todo_list.sections[s].subsections[sb].tasks.len();
-                                    if cur < refs.len()
-                                        && let TaskRef::SubsectionTask { task_idx, .. } = refs[cur]
-                                    {
-                                        ins_idx = task_idx + 1;
+                                    0
+                                } else if cur < refs.len() {
+                                    match refs[cur] {
+                                        TaskRef::SubsectionTask { task_idx, .. } => {
+                                            if above { task_idx } else { task_idx + 1 }
+                                        }
+                                        TaskRef::SectionTask { .. } => {
+                                            if above {
+                                                0
+                                            } else {
+                                                todo_list.sections[s].subsections[sb].tasks.len()
+                                            }
+                                        }
                                     }
-                                    todo_list.sections[s].subsections[sb]
-                                        .tasks
-                                        .insert(ins_idx, task);
-                                    app.right_state.select(Some(ins_idx));
+                                } else {
+                                    todo_list.sections[s].subsections[sb].tasks.len()
                                 }
+                            } else if above {
+                                0
                             } else {
-                                todo_list.sections[s].subsections[sb].tasks.push(task);
-                                app.right_state.select(Some(
-                                    todo_list.sections[s].subsections[sb].tasks.len() - 1,
-                                ));
-                            }
+                                todo_list.sections[s].subsections[sb].tasks.len()
+                            };
+                            todo_list.sections[s].subsections[sb]
+                                .tasks
+                                .insert(ins_idx, task);
                             write_file(path, todo_list)?;
+                            if app.focus == Focus::Right {
+                                app.right_state.select(Some(ins_idx));
+                            }
                         }
                     }
                 }
@@ -476,7 +494,11 @@ pub(crate) fn paste_clipboard(app: &mut AppState, todo_list: &mut TodoList, path
                     TreeNode::Section(s) => s,
                     TreeNode::Subsection(s, _) => s,
                 };
-                let ins_idx = (target_s + 1).min(todo_list.sections.len());
+                let ins_idx = if above {
+                    target_s
+                } else {
+                    (target_s + 1).min(todo_list.sections.len())
+                };
                 todo_list.sections.insert(ins_idx, sec);
                 write_file(path, todo_list)?;
                 app.mode = Mode::Normal;
@@ -488,9 +510,10 @@ pub(crate) fn paste_clipboard(app: &mut AppState, todo_list: &mut TodoList, path
                     app.left_state.select(Some(pos));
                 }
             } else {
-                todo_list.sections.push(sec);
+                let ins_idx = if above { 0 } else { todo_list.sections.len() };
+                todo_list.sections.insert(ins_idx, sec);
                 write_file(path, todo_list)?;
-                app.left_state.select(Some(todo_list.sections.len() - 1));
+                app.left_state.select(Some(ins_idx));
             }
         }
         ClipboardItem::Subsection(sub) => {
@@ -498,12 +521,16 @@ pub(crate) fn paste_clipboard(app: &mut AppState, todo_list: &mut TodoList, path
                 match node {
                     TreeNode::Section(s) => {
                         if s < todo_list.sections.len() {
-                            todo_list.sections[s].subsections.push(sub);
+                            let ins_idx = if above {
+                                0
+                            } else {
+                                todo_list.sections[s].subsections.len()
+                            };
+                            todo_list.sections[s].subsections.insert(ins_idx, sub);
                             write_file(path, todo_list)?;
                             app.mode = Mode::Normal;
                             let temp = crate::tui::build_tree_nodes(todo_list, &app.mode);
-                            let target_sub_idx = todo_list.sections[s].subsections.len() - 1;
-                            if let Some(pos) = temp.iter().position(|n| matches!(n, TreeNode::Subsection(sec_idx, sub_idx) if *sec_idx == s && *sub_idx == target_sub_idx)) {
+                            if let Some(pos) = temp.iter().position(|n| matches!(n, TreeNode::Subsection(sec_idx, sub_idx) if *sec_idx == s && *sub_idx == ins_idx)) {
                                 app.left_state.select(Some(pos));
                             }
                         }
@@ -511,7 +538,11 @@ pub(crate) fn paste_clipboard(app: &mut AppState, todo_list: &mut TodoList, path
                     TreeNode::Subsection(s, sb) => {
                         if s < todo_list.sections.len() {
                             let sec = &mut todo_list.sections[s];
-                            let ins_idx = (sb + 1).min(sec.subsections.len());
+                            let ins_idx = if above {
+                                sb
+                            } else {
+                                (sb + 1).min(sec.subsections.len())
+                            };
                             sec.subsections.insert(ins_idx, sub);
                             write_file(path, todo_list)?;
                             app.mode = Mode::Normal;
@@ -560,7 +591,7 @@ mod tests {
             assert_eq!(t.text, "Task A");
         }
 
-        paste_clipboard(&mut app, &mut list, f.path()).unwrap();
+        paste_clipboard(&mut app, &mut list, f.path(), false).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 3);
         assert_eq!(parsed.sections[0].tasks[0].text, "Task A");
@@ -596,12 +627,49 @@ mod tests {
 
         app.left_state.select(Some(1));
         app.tree_nodes = build_tree_nodes(&list, &app.mode);
-        paste_clipboard(&mut app, &mut list, f.path()).unwrap();
+        paste_clipboard(&mut app, &mut list, f.path(), false).unwrap();
 
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 3);
         assert_eq!(parsed.sections[0].name, "main");
         assert_eq!(parsed.sections[1].name, "clz");
         assert_eq!(parsed.sections[2].name, "main");
+    }
+
+    #[test]
+    fn test_paste_task_above() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] A\n- [ ] B\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(1));
+
+        yank_task(&mut app, &list).unwrap();
+        assert!(matches!(app.clipboard, Some(ClipboardItem::Task(_))));
+
+        paste_clipboard(&mut app, &mut list, f.path(), true).unwrap();
+        let parsed = parse_file(f.path()).unwrap();
+        assert_eq!(parsed.sections[0].tasks.len(), 3);
+        assert_eq!(parsed.sections[0].tasks[0].text, "A");
+        assert_eq!(parsed.sections[0].tasks[1].text, "B");
+        assert_eq!(parsed.sections[0].tasks[2].text, "B");
+    }
+
+    #[test]
+    fn test_paste_section_above() {
+        let (f, mut app, mut list) = setup("# main\n# clz\n");
+        app.focus = Focus::Left;
+        app.left_state.select(Some(0));
+
+        yank_tree_node(&mut app, &list).unwrap();
+        assert!(matches!(app.clipboard, Some(ClipboardItem::Section(_))));
+
+        app.left_state.select(Some(1));
+        app.tree_nodes = build_tree_nodes(&list, &app.mode);
+        paste_clipboard(&mut app, &mut list, f.path(), true).unwrap();
+
+        let parsed = parse_file(f.path()).unwrap();
+        assert_eq!(parsed.sections.len(), 3);
+        assert_eq!(parsed.sections[0].name, "main");
+        assert_eq!(parsed.sections[1].name, "main");
+        assert_eq!(parsed.sections[2].name, "clz");
     }
 }

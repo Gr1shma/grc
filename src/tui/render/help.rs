@@ -48,6 +48,8 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from("    O            - Add new subsection above current item"),
         Line::from("    i            - Rename selected section or subsection"),
         Line::from("    dd           - Delete selected section or subsection instantly"),
+        Line::from("    yy / p       - Yank / paste item below (after current)"),
+        Line::from("    P            - Paste item above (one step up, like Shift+O)"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "  Right Panel (Tasks):",
@@ -65,7 +67,8 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from("    i            - Edit selected task text inline"),
         Line::from("    t            - Set due date (empty = clear, Enter to confirm)"),
         Line::from("    x / Space    - Toggle task status (Done / Todo)"),
-        Line::from("    yy / p       - Yank / paste item"),
+        Line::from("    yy / p       - Yank / paste item below (after current)"),
+        Line::from("    P            - Paste item above (one step up, like Shift+O)"),
         Line::from("    dd           - Delete selected task"),
         Line::from(""),
         Line::from(vec![Span::styled(
