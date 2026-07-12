@@ -3,8 +3,8 @@ pub mod render;
 pub mod state;
 
 use crate::parser::parse_file;
-use crate::task::{Task, TodoList};
-use crate::tui::state::{AppState, Mode, TreeNode};
+use crate::task::{get_node, get_node_mut, NodePath, Section, Task, TodoList};
+use crate::tui::state::{AppState, Mode, TreeItem};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyModifiers},
@@ -36,7 +36,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
     let mut app = AppState::new(todo_list.sections.len());
 
     loop {
-        app.tree_nodes = build_tree_nodes(&todo_list, &app.mode);
+        app.tree_items = build_tree_items(&todo_list, &app.mode);
         sync_selection_states(&mut app, &todo_list);
         term.draw(|f| render::draw_ui(f, &todo_list, &mut app))?;
 
@@ -61,6 +61,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                 Mode::InputTask {
                     editing_idx,
                     insert_idx,
+                    above,
                     mut buf,
                     mut cursor,
                 } => {
@@ -71,6 +72,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         key.code,
                         editing_idx,
                         insert_idx,
+                        above,
                         &mut buf,
                         &mut cursor,
                     )?;
@@ -94,6 +96,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                 }
                 Mode::InputSection {
                     node,
+                    parent,
                     insert_idx,
                     mut buf,
                     mut cursor,
@@ -104,24 +107,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         path,
                         key.code,
                         node,
-                        insert_idx,
-                        &mut buf,
-                        &mut cursor,
-                    )?;
-                    false
-                }
-                Mode::InputSubsection {
-                    parent_sec_idx,
-                    insert_idx,
-                    mut buf,
-                    mut cursor,
-                } => {
-                    input::handle_input_subsection(
-                        &mut app,
-                        &mut todo_list,
-                        path,
-                        key.code,
-                        parent_sec_idx,
+                        parent,
                         insert_idx,
                         &mut buf,
                         &mut cursor,
@@ -141,18 +127,12 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
 fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
     match &app.mode {
         Mode::InputSection { node: None, .. } => {
-            let ghost = TreeNode::Section(todo_list.sections.len());
-            if let Some(pos) = app.tree_nodes.iter().position(|n| *n == ghost) {
+            if let Some(pos) = app
+                .tree_items
+                .iter()
+                .position(|i| matches!(i, TreeItem::Ghost(_)))
+            {
                 app.left_state.select(Some(pos));
-            }
-        }
-        Mode::InputSubsection { parent_sec_idx, .. } => {
-            if *parent_sec_idx < todo_list.sections.len() {
-                let sub_len = todo_list.sections[*parent_sec_idx].subsections.len();
-                let ghost = TreeNode::Subsection(*parent_sec_idx, sub_len);
-                if let Some(pos) = app.tree_nodes.iter().position(|n| *n == ghost) {
-                    app.left_state.select(Some(pos));
-                }
             }
         }
         Mode::InputTask {
@@ -161,7 +141,7 @@ fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
             ..
         } => {
             if let Some(node) = selected_node(app) {
-                let task_refs = get_task_refs(todo_list, node);
+                let task_refs = get_task_refs(todo_list, &node);
                 let pos = insert_idx.unwrap_or(task_refs.len()).min(task_refs.len());
                 app.right_state.select(Some(pos));
             }
@@ -170,162 +150,239 @@ fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
     }
 }
 
-pub fn build_tree_nodes(todo_list: &TodoList, mode: &Mode) -> Vec<TreeNode> {
-    let mut nodes = Vec::new();
-
-    for (s, sec) in todo_list.sections.iter().enumerate() {
-        if let Mode::InputSection {
+/// Build the flat list of rows shown in the left panel. A `Ghost` row is
+/// inserted for a heading that is being created, so it appears at the position
+/// it will occupy once committed.
+pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
+    let ghost = match mode {
+        Mode::InputSection {
             node: None,
-            insert_idx: Some(i),
-            ..
-        } = mode
-            && *i == s
-        {
-            nodes.push(TreeNode::Section(todo_list.sections.len()));
-        }
-        nodes.push(TreeNode::Section(s));
-
-        for (sb, _) in sec.subsections.iter().enumerate() {
-            if let Mode::InputSubsection {
-                parent_sec_idx,
-                insert_idx: Some(i),
-                ..
-            } = mode
-                && *parent_sec_idx == s
-                && *i == sb
-            {
-                nodes.push(TreeNode::Subsection(s, sec.subsections.len()));
-            }
-            nodes.push(TreeNode::Subsection(s, sb));
-        }
-        if let Mode::InputSubsection {
-            parent_sec_idx,
+            parent,
             insert_idx,
             ..
-        } = mode
-            && *parent_sec_idx == s
-            && (insert_idx.is_none() || *insert_idx == Some(sec.subsections.len()))
-        {
-            nodes.push(TreeNode::Subsection(s, sec.subsections.len()));
+        } => Some((parent.clone(), *insert_idx)),
+        _ => None,
+    };
+
+    let mut items = Vec::new();
+
+    fn walk(
+        items: &mut Vec<TreeItem>,
+        ghost: &Option<(Option<NodePath>, Option<usize>)>,
+        parent: Option<NodePath>,
+        children: &[Section],
+        depth: usize,
+    ) {
+        let n = children.len();
+        for i in 0..n {
+            if let Some((gp, gi)) = ghost {
+                if *gp == parent && *gi == Some(i) {
+                    items.push(TreeItem::Ghost(depth));
+                }
+            }
+            let mut p = parent.clone().unwrap_or_default();
+            p.push(i);
+            items.push(TreeItem::Node(p.clone()));
+            walk(
+                items,
+                ghost,
+                Some(p),
+                &children[i].children,
+                depth + 1,
+            );
+        }
+        if let Some((gp, gi)) = ghost {
+            if *gp == parent && (gi.is_none() || *gi == Some(n)) {
+                items.push(TreeItem::Ghost(depth));
+            }
         }
     }
 
-    if let Mode::InputSection {
-        node: None,
-        insert_idx,
-        ..
-    } = mode
-        && (insert_idx.is_none() || *insert_idx == Some(todo_list.sections.len()))
+    walk(&mut items, &ghost, None, &todo_list.sections, 0);
+    items
+}
+
+/// Rebuild the tree rows and select the row for `path` (used right after a
+/// heading is created or renamed).
+pub fn rebuild_and_select(app: &mut AppState, todo_list: &TodoList, path: &NodePath) {
+    app.tree_items = build_tree_items(todo_list, &app.mode);
+    if let Some(pos) = app
+        .tree_items
+        .iter()
+        .position(|i| matches!(i, TreeItem::Node(p) if p == path))
     {
-        nodes.push(TreeNode::Section(todo_list.sections.len()));
+        app.left_state.select(Some(pos));
     }
-
-    nodes
 }
 
-pub fn selected_node(app: &AppState) -> Option<TreeNode> {
+pub fn selected_node(app: &AppState) -> Option<NodePath> {
     let idx = app.left_state.selected()?;
-    app.tree_nodes.get(idx).copied()
-}
-
-pub fn node_name(todo_list: &TodoList, node: TreeNode) -> String {
-    match node {
-        TreeNode::Section(s) => todo_list.sections[s].name.clone(),
-        TreeNode::Subsection(s, sb) => todo_list.sections[s].subsections[sb].name.clone(),
+    match app.tree_items.get(idx)? {
+        TreeItem::Node(path) => Some(path.clone()),
+        TreeItem::Ghost(_) => None,
     }
 }
 
-pub fn count_tasks_in_section(sec: &crate::task::Section) -> usize {
-    let mut n = sec.tasks.len();
-    for sub in &sec.subsections {
-        n += sub.tasks.len();
-    }
-    n
+pub fn node_name(todo_list: &TodoList, node: &NodePath) -> String {
+    get_node(todo_list, node)
+        .map(|s| s.name.clone())
+        .unwrap_or_default()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TaskRef {
-    SectionTask {
-        sec_idx: usize,
-        task_idx: usize,
-    },
-    SubsectionTask {
-        sec_idx: usize,
-        sub_idx: usize,
-        task_idx: usize,
-    },
+pub fn count_tasks(sec: &Section) -> usize {
+    sec.count_tasks()
 }
 
-pub fn get_task_refs(todo_list: &TodoList, node: TreeNode) -> Vec<TaskRef> {
-    let mut refs = Vec::new();
-    match node {
-        TreeNode::Section(s) => {
-            if s < todo_list.sections.len() {
-                let sec = &todo_list.sections[s];
-                for t_idx in 0..sec.tasks.len() {
-                    refs.push(TaskRef::SectionTask {
-                        sec_idx: s,
-                        task_idx: t_idx,
-                    });
-                }
-                for (sb_idx, sub) in sec.subsections.iter().enumerate() {
-                    for t_idx in 0..sub.tasks.len() {
-                        refs.push(TaskRef::SubsectionTask {
-                            sec_idx: s,
-                            sub_idx: sb_idx,
-                            task_idx: t_idx,
-                        });
-                    }
-                }
-            }
+/// Reference to a single task: the node that directly owns it plus its index
+/// within that node's `tasks`, and (for the flattened top-level view) the full
+/// nested path of sub-headings the task lives under, e.g. `backend › api`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TaskRef {
+    pub node: NodePath,
+    pub task_idx: usize,
+    pub sub_name: Option<String>,
+}
+
+/// Tasks shown in the right panel for the selected heading.
+///
+/// * For a top-level heading (`path` of length 1) every task in the subtree is
+///   shown, flattened, with the owning sub-heading name tagged.
+/// * For any deeper heading only its own direct tasks are listed.
+pub fn get_task_refs(todo_list: &TodoList, node: &NodePath) -> Vec<TaskRef> {
+    if let Some(sec) = get_node(todo_list, node) {
+        if node.len() == 1 {
+            let mut out = Vec::new();
+            collect_flatten(todo_list, node, &mut out);
+            out
+        } else {
+            sec.tasks
+                .iter()
+                .enumerate()
+                .map(|(i, _)| TaskRef {
+                    node: node.clone(),
+                    task_idx: i,
+                    sub_name: None,
+                })
+                .collect()
         }
-        TreeNode::Subsection(s, sb) => {
-            if s < todo_list.sections.len() && sb < todo_list.sections[s].subsections.len() {
-                let sub = &todo_list.sections[s].subsections[sb];
-                for t_idx in 0..sub.tasks.len() {
-                    refs.push(TaskRef::SubsectionTask {
-                        sec_idx: s,
-                        sub_idx: sb,
-                        task_idx: t_idx,
-                    });
-                }
-            }
+    } else {
+        Vec::new()
+    }
+}
+
+fn collect_flatten(todo_list: &TodoList, node: &NodePath, out: &mut Vec<TaskRef>) {
+    if let Some(sec) = get_node(todo_list, node) {
+        let sub_name = node_breadcrumb(todo_list, node);
+        for (i, _task) in sec.tasks.iter().enumerate() {
+            out.push(TaskRef {
+                node: node.clone(),
+                task_idx: i,
+                sub_name: sub_name.clone(),
+            });
+        }
+        for (ci, _child) in sec.children.iter().enumerate() {
+            let mut cp = node.to_vec();
+            cp.push(ci);
+            collect_flatten(todo_list, &cp, out);
         }
     }
-    refs
+}
+
+/// For a task owned by the section at `node`, return the joined path of
+/// sub-headings it is nested under (excluding the top-level `node[0]`), e.g.
+/// `backend › api`. Returns `None` for a task that lives directly under the
+/// top-level heading.
+fn node_breadcrumb(todo_list: &TodoList, node: &NodePath) -> Option<String> {
+    if node.len() <= 1 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for k in 1..node.len() {
+        if let Some(sec) = get_node(todo_list, &node[..=k]) {
+            parts.push(sec.name.clone());
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" › "))
+    }
 }
 
 pub fn get_task_from_ref<'a>(todo_list: &'a TodoList, ref_item: &TaskRef) -> &'a Task {
-    match ref_item {
-        TaskRef::SectionTask { sec_idx, task_idx } => {
-            &todo_list.sections[*sec_idx].tasks[*task_idx]
+    &get_node(todo_list, &ref_item.node)
+        .expect("task ref node must exist")
+        .tasks[ref_item.task_idx]
+}
+
+pub fn get_task_from_ref_mut<'a>(
+    todo_list: &'a mut TodoList,
+    ref_item: &TaskRef,
+) -> &'a mut Task {
+    &mut get_node_mut(todo_list, &ref_item.node)
+        .expect("task ref node must exist")
+        .tasks[ref_item.task_idx]
+}
+
+/// Insert `section` as a child of `parent` (`None` for top-level) at `idx`.
+/// Returns the path of the inserted node.
+pub fn insert_section(
+    todo_list: &mut TodoList,
+    parent: Option<&NodePath>,
+    idx: usize,
+    section: Section,
+) -> NodePath {
+    match parent {
+        None => {
+            let i = idx.min(todo_list.sections.len());
+            todo_list.sections.insert(i, section);
+            vec![i]
         }
-        TaskRef::SubsectionTask {
-            sec_idx,
-            sub_idx,
-            task_idx,
-        } => &todo_list.sections[*sec_idx].subsections[*sub_idx].tasks[*task_idx],
+        Some(p) => {
+            let sec = get_node_mut(todo_list, p).expect("parent must exist");
+            let i = idx.min(sec.children.len());
+            sec.children.insert(i, section);
+            let mut path = p.to_vec();
+            path.push(i);
+            path
+        }
     }
 }
 
-pub fn get_task_from_ref_mut<'a>(todo_list: &'a mut TodoList, ref_item: &TaskRef) -> &'a mut Task {
-    match ref_item {
-        TaskRef::SectionTask { sec_idx, task_idx } => {
-            &mut todo_list.sections[*sec_idx].tasks[*task_idx]
+/// Remove the node at `path`, returning the removed section.
+pub fn remove_section(todo_list: &mut TodoList, path: &NodePath) -> Option<Section> {
+    if path.is_empty() {
+        return None;
+    }
+    if path.len() == 1 {
+        if path[0] < todo_list.sections.len() {
+            return Some(todo_list.sections.remove(path[0]));
         }
-        TaskRef::SubsectionTask {
-            sec_idx,
-            sub_idx,
-            task_idx,
-        } => &mut todo_list.sections[*sec_idx].subsections[*sub_idx].tasks[*task_idx],
+        return None;
+    }
+    let parent_path = &path[..path.len() - 1];
+    let idx = *path.last().unwrap();
+    let parent = get_node_mut(todo_list, parent_path)?;
+    if idx < parent.children.len() {
+        Some(parent.children.remove(idx))
+    } else {
+        None
+    }
+}
+
+/// Number of children a node has (top-level count when `path` is `None`).
+pub fn child_count(todo_list: &TodoList, path: Option<&NodePath>) -> usize {
+    match path {
+        None => todo_list.sections.len(),
+        Some(p) => get_node(todo_list, p).map(|s| s.children.len()).unwrap_or(0),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Section, Subsection, Task, TodoList};
-    use crate::tui::state::{AppState, Mode, TreeNode};
+    use crate::task::TodoList;
+    use crate::tui::state::{AppState, Mode, TreeItem};
 
     fn sample_todo_list() -> TodoList {
         TodoList {
@@ -344,12 +401,21 @@ mod tests {
                             due: None,
                         },
                     ],
-                    subsections: vec![Subsection {
+                    children: vec![Section {
                         name: "backend".to_string(),
                         tasks: vec![Task {
                             text: "Fix API".to_string(),
                             is_done: false,
                             due: None,
+                        }],
+                        children: vec![Section {
+                            name: "api".to_string(),
+                            tasks: vec![Task {
+                                text: "Fix endpoint".to_string(),
+                                is_done: false,
+                                due: None,
+                            }],
+                            children: vec![],
                         }],
                     }],
                 },
@@ -360,75 +426,75 @@ mod tests {
                         is_done: false,
                         due: None,
                     }],
-                    subsections: Vec::new(),
+                    children: vec![],
                 },
             ],
         }
     }
 
     #[test]
-    fn build_tree_nodes_in_normal_mode() {
+    fn build_tree_items_in_normal_mode() {
         let list = sample_todo_list();
-        let nodes = build_tree_nodes(&list, &Mode::Normal);
-
-        assert_eq!(nodes.len(), 3);
-        assert_eq!(nodes[0], TreeNode::Section(0));
-        assert_eq!(nodes[1], TreeNode::Subsection(0, 0));
-        assert_eq!(nodes[2], TreeNode::Section(1));
+        let items = build_tree_items(&list, &Mode::Normal);
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0], TreeItem::Node(vec![0]));
+        assert_eq!(items[1], TreeItem::Node(vec![0, 0]));
+        assert_eq!(items[2], TreeItem::Node(vec![0, 0, 0]));
+        assert_eq!(items[3], TreeItem::Node(vec![1]));
     }
 
     #[test]
-    fn build_tree_nodes_empty_list() {
+    fn build_tree_items_empty_list() {
         let list = TodoList::default();
-        let nodes = build_tree_nodes(&list, &Mode::Normal);
-        assert!(nodes.is_empty());
+        let items = build_tree_items(&list, &Mode::Normal);
+        assert!(items.is_empty());
     }
 
     #[test]
     fn selected_node_returns_none_when_nothing_selected() {
         let mut app = AppState::new(0);
-        app.tree_nodes = vec![TreeNode::Section(0)];
-
+        app.tree_items = vec![TreeItem::Node(vec![0])];
         assert!(selected_node(&app).is_none());
     }
 
     #[test]
     fn selected_node_returns_correct_node() {
         let mut app = AppState::new(2);
-        app.tree_nodes = vec![
-            TreeNode::Section(0),
-            TreeNode::Subsection(0, 0),
-            TreeNode::Section(1),
+        app.tree_items = vec![
+            TreeItem::Node(vec![0]),
+            TreeItem::Node(vec![0, 0]),
+            TreeItem::Node(vec![1]),
         ];
         app.left_state.select(Some(1));
-        assert_eq!(selected_node(&app), Some(TreeNode::Subsection(0, 0)));
+        assert_eq!(selected_node(&app), Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn selected_node_returns_none_on_ghost() {
+        let mut app = AppState::new(0);
+        app.tree_items = vec![TreeItem::Ghost(0)];
+        app.left_state.select(Some(0));
+        assert!(selected_node(&app).is_none());
     }
 
     #[test]
     fn node_name_for_section() {
         let list = sample_todo_list();
-        assert_eq!(node_name(&list, TreeNode::Section(0)), "work");
-        assert_eq!(node_name(&list, TreeNode::Section(1)), "personal");
+        assert_eq!(node_name(&list, &vec![0]), "work");
+        assert_eq!(node_name(&list, &vec![1]), "personal");
+        assert_eq!(node_name(&list, &vec![0, 0]), "backend");
     }
 
     #[test]
-    fn node_name_for_subsection() {
+    fn count_tasks_includes_all_descendants() {
         let list = sample_todo_list();
-        assert_eq!(node_name(&list, TreeNode::Subsection(0, 0)), "backend");
-    }
-
-    #[test]
-    fn count_tasks_includes_subsection_tasks() {
-        let list = sample_todo_list();
-
-        assert_eq!(count_tasks_in_section(&list.sections[0]), 3);
+        assert_eq!(count_tasks(&list.sections[0]), 4);
     }
 
     #[test]
     fn count_tasks_section_only() {
         let list = sample_todo_list();
-
-        assert_eq!(count_tasks_in_section(&list.sections[1]), 1);
+        assert_eq!(count_tasks(&list.sections[1]), 1);
     }
 
     #[test]
@@ -436,99 +502,69 @@ mod tests {
         let sec = Section {
             name: "empty".to_string(),
             tasks: Vec::new(),
-            subsections: Vec::new(),
+            children: Vec::new(),
         };
-        assert_eq!(count_tasks_in_section(&sec), 0);
+        assert_eq!(count_tasks(&sec), 0);
     }
 
     #[test]
-    fn task_refs_for_section_includes_all_tasks() {
+    fn task_refs_for_top_level_flattens_subtree() {
         let list = sample_todo_list();
-        let refs = get_task_refs(&list, TreeNode::Section(0));
-
-        assert_eq!(refs.len(), 3);
-        assert_eq!(
-            refs[0],
-            TaskRef::SectionTask {
-                sec_idx: 0,
-                task_idx: 0
-            }
-        );
-        assert_eq!(
-            refs[1],
-            TaskRef::SectionTask {
-                sec_idx: 0,
-                task_idx: 1
-            }
-        );
-        assert_eq!(
-            refs[2],
-            TaskRef::SubsectionTask {
-                sec_idx: 0,
-                sub_idx: 0,
-                task_idx: 0
-            }
-        );
+        let refs = get_task_refs(&list, &vec![0]);
+        assert_eq!(refs.len(), 4);
+        // direct tasks of root (no sub-name tag)
+        assert_eq!(refs[0].node, vec![0]);
+        assert_eq!(refs[0].task_idx, 0);
+        assert_eq!(refs[0].sub_name, None);
+        assert_eq!(refs[1].node, vec![0]);
+        assert_eq!(refs[1].task_idx, 1);
+        assert_eq!(refs[1].sub_name, None);
+        // task inside first child "backend", tagged with its name
+        assert_eq!(refs[2].node, vec![0, 0]);
+        assert_eq!(refs[2].task_idx, 0);
+        assert_eq!(refs[2].sub_name.as_deref(), Some("backend"));
+        // task inside grandchild backend->api, tagged with full path
+        assert_eq!(refs[3].node, vec![0, 0, 0]);
+        assert_eq!(refs[3].task_idx, 0);
+        assert_eq!(refs[3].sub_name.as_deref(), Some("backend › api"));
     }
 
     #[test]
-    fn task_refs_for_subsection() {
+    fn task_refs_for_nested_node_lists_direct_only() {
         let list = sample_todo_list();
-        let refs = get_task_refs(&list, TreeNode::Subsection(0, 0));
+        let refs = get_task_refs(&list, &vec![0, 0]);
         assert_eq!(refs.len(), 1);
-        assert_eq!(
-            refs[0],
-            TaskRef::SubsectionTask {
-                sec_idx: 0,
-                sub_idx: 0,
-                task_idx: 0
-            }
-        );
+        assert_eq!(refs[0].node, vec![0, 0]);
+        assert_eq!(refs[0].task_idx, 0);
+        assert_eq!(refs[0].sub_name, None);
     }
 
     #[test]
     fn task_refs_for_out_of_bounds_section() {
         let list = sample_todo_list();
-        let refs = get_task_refs(&list, TreeNode::Section(99));
+        let refs = get_task_refs(&list, &vec![99]);
         assert!(refs.is_empty());
-    }
-
-    #[test]
-    fn task_refs_for_out_of_bounds_subsection() {
-        let list = sample_todo_list();
-        let refs = get_task_refs(&list, TreeNode::Subsection(0, 99));
-        assert!(refs.is_empty());
-    }
-
-    #[test]
-    fn get_task_from_ref_section_task() {
-        let list = sample_todo_list();
-        let r = TaskRef::SectionTask {
-            sec_idx: 0,
-            task_idx: 0,
-        };
-        let task = get_task_from_ref(&list, &r);
-        assert_eq!(task.text, "Task A");
     }
 
     #[test]
     fn get_task_from_ref_subsection_task() {
         let list = sample_todo_list();
-        let r = TaskRef::SubsectionTask {
-            sec_idx: 0,
-            sub_idx: 0,
+        let r = TaskRef {
+            node: vec![0, 0, 0],
             task_idx: 0,
+            sub_name: Some("api".to_string()),
         };
         let task = get_task_from_ref(&list, &r);
-        assert_eq!(task.text, "Fix API");
+        assert_eq!(task.text, "Fix endpoint");
     }
 
     #[test]
     fn get_task_from_ref_mut_modifies_task() {
         let mut list = sample_todo_list();
-        let r = TaskRef::SectionTask {
-            sec_idx: 0,
+        let r = TaskRef {
+            node: vec![0],
             task_idx: 0,
+            sub_name: None,
         };
         let task = get_task_from_ref_mut(&mut list, &r);
         task.is_done = true;
@@ -538,15 +574,49 @@ mod tests {
     }
 
     #[test]
-    fn get_task_from_ref_mut_subsection() {
+    fn get_task_from_ref_mut_nested_subsection() {
         let mut list = sample_todo_list();
-        let r = TaskRef::SubsectionTask {
-            sec_idx: 0,
-            sub_idx: 0,
+        let r = TaskRef {
+            node: vec![0, 0, 0],
             task_idx: 0,
+            sub_name: Some("api".to_string()),
         };
         let task = get_task_from_ref_mut(&mut list, &r);
-        task.text = "Updated API".to_string();
-        assert_eq!(list.sections[0].subsections[0].tasks[0].text, "Updated API");
+        task.text = "Updated endpoint".to_string();
+        assert_eq!(list.sections[0].children[0].children[0].tasks[0].text, "Updated endpoint");
+    }
+
+    #[test]
+    fn insert_section_top_level() {
+        let mut list = sample_todo_list();
+        let path = insert_section(&mut list, None, 1, Section::new("inserted"));
+        assert_eq!(path, vec![1]);
+        assert_eq!(list.sections.len(), 3);
+        assert_eq!(list.sections[1].name, "inserted");
+    }
+
+    #[test]
+    fn insert_section_nested() {
+        let mut list = sample_todo_list();
+        let path = insert_section(&mut list, Some(&vec![0]), 0, Section::new("child"));
+        assert_eq!(path, vec![0, 0]);
+        assert_eq!(list.sections[0].children[0].name, "child");
+        assert_eq!(list.sections[0].children[1].name, "backend");
+    }
+
+    #[test]
+    fn remove_section_nested() {
+        let mut list = sample_todo_list();
+        let removed = remove_section(&mut list, &vec![0, 0]).unwrap();
+        assert_eq!(removed.name, "backend");
+        assert!(list.sections[0].children.is_empty());
+    }
+
+    #[test]
+    fn child_count_helper() {
+        let list = sample_todo_list();
+        assert_eq!(child_count(&list, None), 2);
+        assert_eq!(child_count(&list, Some(&vec![0])), 1);
+        assert_eq!(child_count(&list, Some(&vec![0, 0])), 1);
     }
 }

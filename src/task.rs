@@ -7,22 +7,77 @@ pub struct Task {
     pub due: Option<NaiveDate>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Subsection {
-    pub name: String,
-    pub tasks: Vec<Task>,
-}
-
+/// A heading in the markdown file. Headings can be nested arbitrarily deep:
+/// each section owns its direct tasks and a list of child sections.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Section {
     pub name: String,
     pub tasks: Vec<Task>,
-    pub subsections: Vec<Subsection>,
+    pub children: Vec<Section>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TodoList {
     pub sections: Vec<Section>,
+}
+
+impl Section {
+    pub fn new(name: impl Into<String>) -> Self {
+        Section {
+            name: name.into(),
+            tasks: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Total number of tasks in this section and all of its descendants.
+    pub fn count_tasks(&self) -> usize {
+        let mut n = self.tasks.len();
+        for child in &self.children {
+            n += child.count_tasks();
+        }
+        n
+    }
+}
+
+/// A path of child indices identifying a section in the tree, e.g. `[2, 0]`
+/// means the first child of the third top-level section.
+pub type NodePath = Vec<usize>;
+
+/// Immutably borrow the section located at `path`.
+pub fn get_node<'a>(list: &'a TodoList, path: &[usize]) -> Option<&'a Section> {
+    get_node_slice(&list.sections, path)
+}
+
+fn get_node_slice<'a>(children: &'a [Section], path: &[usize]) -> Option<&'a Section> {
+    if path.is_empty() {
+        return None;
+    }
+    let sec = children.get(path[0])?;
+    get_node_slice_impl(sec, &path[1..])
+}
+
+fn get_node_slice_impl<'a>(sec: &'a Section, rest: &[usize]) -> Option<&'a Section> {
+    if rest.is_empty() {
+        return Some(sec);
+    }
+    get_node_slice_impl(sec.children.get(rest[0])?, &rest[1..])
+}
+
+/// Mutably borrow the section located at `path`.
+pub fn get_node_mut<'a>(list: &'a mut TodoList, path: &[usize]) -> Option<&'a mut Section> {
+    if path.is_empty() {
+        return None;
+    }
+    let sec = list.sections.get_mut(path[0])?;
+    get_node_mut_impl(sec, &path[1..])
+}
+
+fn get_node_mut_impl<'a>(sec: &'a mut Section, rest: &[usize]) -> Option<&'a mut Section> {
+    if rest.is_empty() {
+        return Some(sec);
+    }
+    get_node_mut_impl(sec.children.get_mut(rest[0])?, &rest[1..])
 }
 
 #[cfg(test)]
@@ -71,50 +126,35 @@ mod tests {
     }
 
     #[test]
-    fn subsection_creation() {
-        let sub = Subsection {
-            name: "urgent".to_string(),
-            tasks: vec![
-                Task {
-                    text: "Task A".to_string(),
-                    is_done: false,
-                    due: None,
-                },
-                Task {
-                    text: "Task B".to_string(),
-                    is_done: true,
-                    due: None,
-                },
-            ],
-        };
-        assert_eq!(sub.name, "urgent");
-        assert_eq!(sub.tasks.len(), 2);
-        assert!(!sub.tasks[0].is_done);
-        assert!(sub.tasks[1].is_done);
+    fn section_creation() {
+        let sec = Section::new("work");
+        assert_eq!(sec.name, "work");
+        assert!(sec.tasks.is_empty());
+        assert!(sec.children.is_empty());
     }
 
     #[test]
-    fn section_with_tasks_and_subsections() {
-        let sec = Section {
-            name: "work".to_string(),
-            tasks: vec![Task {
-                text: "Top-level".to_string(),
-                is_done: false,
-                due: None,
-            }],
-            subsections: vec![Subsection {
-                name: "backend".to_string(),
-                tasks: vec![Task {
-                    text: "Fix API".to_string(),
-                    is_done: false,
-                    due: None,
-                }],
-            }],
-        };
-        assert_eq!(sec.name, "work");
-        assert_eq!(sec.tasks.len(), 1);
-        assert_eq!(sec.subsections.len(), 1);
-        assert_eq!(sec.subsections[0].name, "backend");
+    fn nested_section_hierarchy() {
+        let mut root = Section::new("work");
+        root.tasks.push(Task {
+            text: "Top-level".to_string(),
+            is_done: false,
+            due: None,
+        });
+        root.children.push(Section::new("backend"));
+        root.children[0].children.push(Section::new("api"));
+        root.children[0].children[0].tasks.push(Task {
+            text: "Fix endpoint".to_string(),
+            is_done: false,
+            due: None,
+        });
+
+        assert_eq!(root.name, "work");
+        assert_eq!(root.tasks.len(), 1);
+        assert_eq!(root.children.len(), 1);
+        assert_eq!(root.children[0].name, "backend");
+        assert_eq!(root.children[0].children[0].name, "api");
+        assert_eq!(root.children[0].children[0].tasks[0].text, "Fix endpoint");
     }
 
     #[test]
@@ -126,11 +166,7 @@ mod tests {
     #[test]
     fn todolist_clone_is_independent() {
         let mut original = TodoList::default();
-        original.sections.push(Section {
-            name: "main".to_string(),
-            tasks: Vec::new(),
-            subsections: Vec::new(),
-        });
+        original.sections.push(Section::new("main"));
         let cloned = original.clone();
         original.sections.clear();
         assert!(original.sections.is_empty());

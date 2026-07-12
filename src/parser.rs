@@ -1,4 +1,4 @@
-use crate::task::{Section, Subsection, Task, TodoList};
+use crate::task::{get_node_mut, Section, Task, TodoList};
 use anyhow::Result;
 use chrono::NaiveDate;
 use std::fs::File;
@@ -25,40 +25,50 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
     let reader = BufReader::new(file);
     let mut todo_list = TodoList::default();
 
-    let mut current_section: Option<Section> = None;
-    let mut current_subsection: Option<Subsection> = None;
+    // `stack` holds the currently open headings as `(level, path)` pairs, where
+    // `path` is the index path of that heading. The parent of a new heading is
+    // the top of the stack after popping every entry whose level is >= the new
+    // heading's level (so siblings at the same level don't nest).
+    let mut stack: Vec<(usize, Vec<usize>)> = Vec::new();
 
     for line in reader.lines() {
         let line = line?;
         let trimmed = line.trim();
 
-        if trimmed.starts_with("## ") {
-            if let Some(sub) = current_subsection.take()
-                && let Some(ref mut sec) = current_section
-            {
-                sec.subsections.push(sub);
+        let hashes = trimmed.bytes().take_while(|b| *b == b'#').count();
+        let is_heading = hashes > 0
+            && hashes < trimmed.len()
+            && trimmed.as_bytes()[hashes] == b' '
+            && !trimmed[hashes + 1..].trim().is_empty();
+
+        if is_heading {
+            let level = hashes;
+            let name = trimmed[hashes + 1..].trim().to_string();
+
+            while stack.last().map_or(false, |(lvl, _)| *lvl >= level) {
+                stack.pop();
             }
-            let sub_name = trimmed.trim_start_matches("## ").trim().to_string();
-            current_subsection = Some(Subsection {
-                name: sub_name,
-                tasks: Vec::new(),
-            });
-        } else if trimmed.starts_with("# ") {
-            if let Some(sub) = current_subsection.take()
-                && let Some(ref mut sec) = current_section
-            {
-                sec.subsections.push(sub);
+
+            let parent_path: Vec<usize> = stack
+                .last()
+                .map(|(_, p)| p.clone())
+                .unwrap_or_default();
+
+            let new_section = Section::new(name);
+            if parent_path.is_empty() {
+                todo_list.sections.push(new_section);
+                stack.push((level, vec![todo_list.sections.len() - 1]));
+            } else {
+                let parent = get_node_mut(&mut todo_list, &parent_path).expect("parent must exist");
+                parent.children.push(new_section);
+                let mut p = parent_path.clone();
+                p.push(parent.children.len() - 1);
+                stack.push((level, p));
             }
-            if let Some(sec) = current_section.take() {
-                todo_list.sections.push(sec);
-            }
-            let sec_name = trimmed.trim_start_matches("# ").trim().to_string();
-            current_section = Some(Section {
-                name: sec_name,
-                tasks: Vec::new(),
-                subsections: Vec::new(),
-            });
-        } else if trimmed.starts_with("- [ ]")
+            continue;
+        }
+
+        if trimmed.starts_with("- [ ]")
             || trimmed.starts_with("- [x]")
             || trimmed.starts_with("- [X]")
         {
@@ -83,21 +93,12 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
                 due,
             };
 
-            if let Some(ref mut sub) = current_subsection {
-                sub.tasks.push(task);
-            } else if let Some(ref mut sec) = current_section {
-                sec.tasks.push(task);
+            if let Some((_, path)) = stack.last() {
+                if let Some(sec) = get_node_mut(&mut todo_list, path) {
+                    sec.tasks.push(task);
+                }
             }
         }
-    }
-
-    if let Some(sub) = current_subsection
-        && let Some(ref mut sec) = current_section
-    {
-        sec.subsections.push(sub);
-    }
-    if let Some(sec) = current_section {
-        todo_list.sections.push(sec);
     }
 
     Ok(todo_list)
@@ -109,39 +110,36 @@ pub fn write_file(path: &Path, todo_list: &TodoList) -> Result<()> {
     let mut last_wrote_tasks = false;
 
     for sec in &todo_list.sections {
-        if !first && last_wrote_tasks {
-            writeln!(file)?;
-        }
-        writeln!(file, "# {}", sec.name)?;
-        first = false;
+        write_section(&mut file, sec, 1, &mut first, &mut last_wrote_tasks)?;
+    }
+    Ok(())
+}
 
-        if !sec.tasks.is_empty() {
-            writeln!(file)?;
-            for task in &sec.tasks {
-                write_task_line(&mut file, task)?;
-            }
-            last_wrote_tasks = true;
-        } else {
-            last_wrote_tasks = false;
-        }
+fn write_section(
+    file: &mut File,
+    sec: &Section,
+    level: usize,
+    first: &mut bool,
+    last_wrote_tasks: &mut bool,
+) -> Result<()> {
+    if !*first && *last_wrote_tasks {
+        writeln!(file)?;
+    }
+    writeln!(file, "{} {}", "#".repeat(level), sec.name)?;
+    *first = false;
 
-        for sub in &sec.subsections {
-            if !first && last_wrote_tasks {
-                writeln!(file)?;
-            }
-            writeln!(file, "## {}", sub.name)?;
-            first = false;
-
-            if !sub.tasks.is_empty() {
-                writeln!(file)?;
-                for task in &sub.tasks {
-                    write_task_line(&mut file, task)?;
-                }
-                last_wrote_tasks = true;
-            } else {
-                last_wrote_tasks = false;
-            }
+    if !sec.tasks.is_empty() {
+        writeln!(file)?;
+        for task in &sec.tasks {
+            write_task_line(file, task)?;
         }
+        *last_wrote_tasks = true;
+    } else {
+        *last_wrote_tasks = false;
+    }
+
+    for child in &sec.children {
+        write_section(file, child, level + 1, first, last_wrote_tasks)?;
     }
     Ok(())
 }
@@ -165,7 +163,7 @@ fn write_task_line(file: &mut File, task: &Task) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::{Section, Subsection, Task, TodoList};
+    use crate::task::TodoList;
     use chrono::NaiveDate;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -209,21 +207,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_subsections() {
+    fn parses_nested_subsections() {
         let content =
             "# work\n- [ ] Top task\n## backend\n- [ ] Fix API\n## frontend\n- [x] Style button\n";
         let f = temp_file_with(content);
         let list = parse_file(f.path()).unwrap();
         assert_eq!(list.sections.len(), 1);
         assert_eq!(list.sections[0].tasks.len(), 1);
-        assert_eq!(list.sections[0].subsections.len(), 2);
-        assert_eq!(list.sections[0].subsections[0].name, "backend");
-        assert_eq!(list.sections[0].subsections[1].name, "frontend");
-        assert!(list.sections[0].subsections[1].tasks[0].is_done);
+        assert_eq!(list.sections[0].children.len(), 2);
+        assert_eq!(list.sections[0].children[0].name, "backend");
+        assert_eq!(list.sections[0].children[1].name, "frontend");
+        assert!(list.sections[0].children[1].tasks[0].is_done);
     }
 
     #[test]
-    fn parses_multiple_sections() {
+    fn parses_multiple_top_level_sections() {
         let content = "# work\n- [ ] Task A\n# personal\n- [ ] Task B\n";
         let f = temp_file_with(content);
         let list = parse_file(f.path()).unwrap();
@@ -245,8 +243,8 @@ mod tests {
         let list = parse_file(f.path()).unwrap();
         assert_eq!(list.sections.len(), 1);
         assert!(list.sections[0].tasks.is_empty());
-        assert_eq!(list.sections[0].subsections.len(), 1);
-        assert!(list.sections[0].subsections[0].tasks.is_empty());
+        assert_eq!(list.sections[0].children.len(), 1);
+        assert!(list.sections[0].children[0].tasks.is_empty());
     }
 
     #[test]
@@ -256,6 +254,70 @@ mod tests {
         let list = parse_file(f.path()).unwrap();
         assert_eq!(list.sections[0].tasks.len(), 1);
         assert_eq!(list.sections[0].tasks[0].text, "Real task");
+    }
+
+    #[test]
+    fn parses_file_starting_with_second_level_heading() {
+        let content = "## My Project\n- [ ] Task one\n- [ ] Task two\n";
+        let f = temp_file_with(content);
+        let list = parse_file(f.path()).unwrap();
+        assert_eq!(list.sections.len(), 1);
+        assert_eq!(list.sections[0].name, "My Project");
+        assert_eq!(list.sections[0].tasks.len(), 2);
+    }
+
+    #[test]
+    fn parses_deep_four_level_heading_hierarchy() {
+        let content = "# a\n## b\n### c\n#### d\n- [ ] deep task\n";
+        let f = temp_file_with(content);
+        let list = parse_file(f.path()).unwrap();
+        assert_eq!(list.sections[0].name, "a");
+        assert_eq!(list.sections[0].children[0].name, "b");
+        assert_eq!(list.sections[0].children[0].children[0].name, "c");
+        assert_eq!(
+            list.sections[0].children[0].children[0].children[0].name,
+            "d"
+        );
+        assert_eq!(
+            list.sections[0].children[0].children[0].children[0].tasks[0].text,
+            "deep task"
+        );
+    }
+
+    #[test]
+    fn parses_dual_level_jump_as_implied_child() {
+        let content = "# top\n### skip\n- [ ] only task\n";
+        let f = temp_file_with(content);
+        let list = parse_file(f.path()).unwrap();
+        assert_eq!(list.sections.len(), 1);
+        assert_eq!(list.sections[0].name, "top");
+        assert_eq!(list.sections[0].children.len(), 1);
+        assert_eq!(list.sections[0].children[0].name, "skip");
+        assert_eq!(list.sections[0].children[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn parses_multiple_second_level_headings_as_sections() {
+        let content = "## Project A\n- [ ] a\n## Project B\n- [ ] b\n";
+        let f = temp_file_with(content);
+        let list = parse_file(f.path()).unwrap();
+        assert_eq!(list.sections.len(), 2);
+        assert_eq!(list.sections[0].name, "Project A");
+        assert_eq!(list.sections[1].name, "Project B");
+    }
+
+    #[test]
+    fn ignores_random_prose_between_headings_and_tasks() {
+        let content = "# Notes\nSome intro paragraph.\n\nHere is a bullet point that is not a task: foo\n- [ ] Real task\nAnother random line\n## Sub\nMore prose\n- [x] Done subtask\n";
+        let f = temp_file_with(content);
+        let list = parse_file(f.path()).unwrap();
+        assert_eq!(list.sections.len(), 1);
+        assert_eq!(list.sections[0].name, "Notes");
+        assert_eq!(list.sections[0].tasks.len(), 1);
+        assert_eq!(list.sections[0].tasks[0].text, "Real task");
+        assert_eq!(list.sections[0].children.len(), 1);
+        assert_eq!(list.sections[0].children[0].name, "Sub");
+        assert!(list.sections[0].children[0].tasks[0].is_done);
     }
 
     #[test]
@@ -281,12 +343,21 @@ mod tests {
                         due: Some(NaiveDate::from_ymd_opt(2025, 3, 20).unwrap()),
                     },
                 ],
-                subsections: vec![Subsection {
+                children: vec![Section {
                     name: "sub1".to_string(),
                     tasks: vec![Task {
                         text: "Sub task".to_string(),
                         is_done: false,
                         due: None,
+                    }],
+                    children: vec![Section {
+                        name: "subsub".to_string(),
+                        tasks: vec![Task {
+                            text: "Deep task".to_string(),
+                            is_done: false,
+                            due: None,
+                        }],
+                        children: vec![],
                     }],
                 }],
             }],
@@ -305,9 +376,17 @@ mod tests {
             parsed.sections[0].tasks[1].due,
             Some(NaiveDate::from_ymd_opt(2025, 3, 20).unwrap())
         );
-        assert_eq!(parsed.sections[0].subsections.len(), 1);
-        assert_eq!(parsed.sections[0].subsections[0].name, "sub1");
-        assert_eq!(parsed.sections[0].subsections[0].tasks.len(), 1);
+        assert_eq!(parsed.sections[0].children.len(), 1);
+        assert_eq!(parsed.sections[0].children[0].name, "sub1");
+        assert_eq!(parsed.sections[0].children[0].tasks.len(), 1);
+        assert_eq!(
+            parsed.sections[0].children[0].children[0].name,
+            "subsub"
+        );
+        assert_eq!(
+            parsed.sections[0].children[0].children[0].tasks[0].text,
+            "Deep task"
+        );
     }
 
     #[test]
@@ -327,7 +406,7 @@ mod tests {
                         due: None,
                     },
                 ],
-                subsections: Vec::new(),
+                children: vec![],
             }],
         };
         let f = NamedTempFile::new().unwrap();
@@ -347,7 +426,7 @@ mod tests {
                     is_done: false,
                     due: Some(NaiveDate::from_ymd_opt(2025, 12, 1).unwrap()),
                 }],
-                subsections: Vec::new(),
+                children: vec![],
             }],
         };
         let f = NamedTempFile::new().unwrap();
@@ -362,9 +441,10 @@ mod tests {
             sections: vec![Section {
                 name: "Projects".to_string(),
                 tasks: Vec::new(),
-                subsections: vec![Subsection {
+                children: vec![Section {
                     name: "Rust".to_string(),
                     tasks: Vec::new(),
+                    children: Vec::new(),
                 }],
             }],
         };
@@ -373,6 +453,41 @@ mod tests {
         let content = std::fs::read_to_string(f.path()).unwrap();
         assert!(content.contains("# Projects"));
         assert!(content.contains("## Rust"));
+    }
+
+    #[test]
+    fn write_file_four_level_headings() {
+        let list = TodoList {
+            sections: vec![Section {
+                name: "a".to_string(),
+                tasks: Vec::new(),
+                children: vec![Section {
+                    name: "b".to_string(),
+                    tasks: Vec::new(),
+                    children: vec![Section {
+                        name: "c".to_string(),
+                        tasks: Vec::new(),
+                        children: vec![Section {
+                            name: "d".to_string(),
+                            tasks: vec![Task {
+                                text: "deep".to_string(),
+                                is_done: false,
+                                due: None,
+                            }],
+                            children: vec![],
+                        }],
+                    }],
+                }],
+            }],
+        };
+        let f = NamedTempFile::new().unwrap();
+        write_file(f.path(), &list).unwrap();
+        let content = std::fs::read_to_string(f.path()).unwrap();
+        assert!(content.contains("# a"));
+        assert!(content.contains("## b"));
+        assert!(content.contains("### c"));
+        assert!(content.contains("#### d"));
+        assert!(content.contains("- [ ] deep"));
     }
 
     #[test]
@@ -394,13 +509,14 @@ mod tests {
                     is_done: false,
                     due: None,
                 }],
-                subsections: vec![Subsection {
+                children: vec![Section {
                     name: "Subsection 1".to_string(),
                     tasks: vec![Task {
                         text: "Task 2".to_string(),
                         is_done: false,
                         due: None,
                     }],
+                    children: Vec::new(),
                 }],
             }],
         };

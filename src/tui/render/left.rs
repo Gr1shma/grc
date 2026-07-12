@@ -1,6 +1,6 @@
 use crate::task::TodoList;
-use crate::tui::count_tasks_in_section;
-use crate::tui::state::{AppState, Focus, Mode, TreeNode};
+use crate::tui::count_tasks;
+use crate::tui::state::{AppState, Focus, Mode, TreeItem};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -11,10 +11,7 @@ use ratatui::{
 
 pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: Rect) {
     let focused = app.focus == Focus::Left && matches!(app.mode, Mode::Normal);
-    let renaming = matches!(
-        app.mode,
-        Mode::InputSection { .. } | Mode::InputSubsection { .. }
-    );
+    let renaming = matches!(app.mode, Mode::InputSection { .. });
 
     let border_color = if renaming || focused {
         Color::Cyan
@@ -33,7 +30,7 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         .border_style(Style::default().fg(border_color));
 
     let renaming_node = if let Mode::InputSection { node: Some(n), .. } = &app.mode {
-        Some(*n)
+        Some(n.clone())
     } else {
         None
     };
@@ -48,52 +45,29 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         0
     };
 
-    let (sec_ghost_node, sec_ghost_buf, sec_ghost_cursor) = if let Mode::InputSection {
+    let ghost = if let Mode::InputSection {
         node: None,
         buf,
         cursor,
         ..
     } = &app.mode
     {
-        (
-            Some(TreeNode::Section(todo_list.sections.len())),
-            Some(buf.clone()),
-            *cursor,
-        )
+        Some((buf.clone(), *cursor))
     } else {
-        (None, None, 0)
-    };
-
-    let (sub_ghost_node, sub_ghost_buf, sub_ghost_cursor) = if let Mode::InputSubsection {
-        parent_sec_idx,
-        buf,
-        cursor,
-        ..
-    } = &app.mode
-    {
-        let sub_len = todo_list.sections[*parent_sec_idx].subsections.len();
-        (
-            Some(TreeNode::Subsection(*parent_sec_idx, sub_len)),
-            Some(buf.clone()),
-            *cursor,
-        )
-    } else {
-        (None, None, 0)
+        None
     };
 
     let items: Vec<ListItem> = app
-        .tree_nodes
+        .tree_items
         .iter()
-        .map(|node| {
-            if Some(*node) == sec_ghost_node {
-                let (before, after) =
-                    crate::tui::render::split_at_char(sec_ghost_buf.as_deref().unwrap_or(""), sec_ghost_cursor);
+        .map(|item| match item {
+            TreeItem::Ghost(depth) => {
+                let (buf, cursor) = ghost.clone().unwrap_or_default();
+                let (before, after) = crate::tui::render::split_at_char(&buf, cursor);
                 ListItem::new(Line::from(vec![
                     Span::styled(
-                        "  ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                        indent(*depth),
+                        Style::default().fg(Color::Green),
                     ),
                     Span::styled(before.to_string(), Style::default().fg(Color::White)),
                     Span::styled(
@@ -104,86 +78,36 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
                     ),
                     Span::styled(after.to_string(), Style::default().fg(Color::White)),
                 ]))
-            } else if Some(*node) == renaming_node {
-                let (before, after) =
-                    crate::tui::render::split_at_char(rename_buf.as_deref().unwrap_or(""), rename_cursor);
-                match node {
-                    TreeNode::Section(_s) => {
-                        let arrow = "  ";
-                        ListItem::new(Line::from(vec![
-                            Span::styled(
-                                arrow,
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                            Span::styled(before.to_string(), Style::default().fg(Color::White)),
-                            Span::styled(
-                                "|",
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::SLOW_BLINK),
-                            ),
-                            Span::styled(after.to_string(), Style::default().fg(Color::White)),
-                        ]))
-                    }
-                    TreeNode::Subsection(_s, _sb) => {
-                        let connector = "    ";
-                        ListItem::new(Line::from(vec![
-                            Span::styled(connector, Style::default().fg(Color::Blue)),
-                            Span::styled(before.to_string(), Style::default().fg(Color::White)),
-                            Span::styled(
-                                "|",
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::SLOW_BLINK),
-                            ),
-                            Span::styled(after.to_string(), Style::default().fg(Color::White)),
-                        ]))
-                    }
-                }
-            } else if Some(*node) == sub_ghost_node {
-                let (before, after) =
-                    crate::tui::render::split_at_char(sub_ghost_buf.as_deref().unwrap_or(""), sub_ghost_cursor);
-                match node {
-                    TreeNode::Subsection(_s, _sb) => {
-                        let connector = "    ";
-                        ListItem::new(Line::from(vec![
-                            Span::styled(connector, Style::default().fg(Color::Blue)),
-                            Span::styled(before.to_string(), Style::default().fg(Color::White)),
-                            Span::styled(
-                                "|",
-                                Style::default()
-                                    .fg(Color::Green)
-                                    .add_modifier(Modifier::SLOW_BLINK),
-                            ),
-                            Span::styled(after.to_string(), Style::default().fg(Color::White)),
-                        ]))
-                    }
-                    _ => ListItem::new(Line::from("")),
-                }
-            } else {
-                match node {
-                    TreeNode::Section(s) => {
-                        let sec = &todo_list.sections[*s];
-                        let arrow = "  ";
-                        let n = count_tasks_in_section(sec);
-                        ListItem::new(Line::from(vec![Span::styled(
-                            format!("{}{} ({})", arrow, sec.name, n),
+            }
+            TreeItem::Node(path) => {
+                let depth = path.len().saturating_sub(1);
+                if Some(path) == renaming_node.as_ref() {
+                    let (before, after) =
+                        crate::tui::render::split_at_char(rename_buf.as_deref().unwrap_or(""), rename_cursor);
+                    ListItem::new(Line::from(vec![
+                        Span::styled(indent(depth), Style::default().fg(Color::Cyan)),
+                        Span::styled(before, Style::default().fg(Color::White)),
+                        Span::styled(
+                            "|",
                             Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        )]))
-                    }
-                    TreeNode::Subsection(s, sb) => {
-                        let sec = &todo_list.sections[*s];
-                        let sub = &sec.subsections[*sb];
-                        let connector = "    ";
-                        ListItem::new(Line::from(vec![Span::styled(
-                            format!("{}{} ({})", connector, sub.name, sub.tasks.len()),
-                            Style::default().fg(Color::Blue),
-                        )]))
-                    }
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::SLOW_BLINK),
+                        ),
+                        Span::styled(after, Style::default().fg(Color::White)),
+                    ]))
+                } else if let Some(sec) = crate::task::get_node(todo_list, path) {
+                    let n = count_tasks(sec);
+                    let (fg, modifier) = if depth == 0 {
+                        (Color::Yellow, Modifier::BOLD)
+                    } else {
+                        (Color::Blue, Modifier::empty())
+                    };
+                    ListItem::new(Line::from(vec![Span::styled(
+                        format!("{}{} ({})", indent(depth), sec.name, n),
+                        Style::default().fg(fg).add_modifier(modifier),
+                    )]))
+                } else {
+                    ListItem::new(Line::from(""))
                 }
             }
         })
@@ -206,4 +130,9 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         .highlight_symbol("");
 
     f.render_stateful_widget(list, area, &mut app.left_state);
+}
+
+/// Two spaces of indentation per nesting level.
+fn indent(depth: usize) -> String {
+    "  ".repeat(depth)
 }

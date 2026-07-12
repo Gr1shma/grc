@@ -1,4 +1,4 @@
-use crate::task::{Section, Subsection, Task};
+use crate::task::{NodePath, Section, Task};
 use ratatui::widgets::ListState;
 
 #[derive(PartialEq, Clone, Copy, Debug)]
@@ -7,17 +7,19 @@ pub enum Focus {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum TreeNode {
-    Section(usize),
-    Subsection(usize, usize),
+/// A row in the left (tree) panel.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TreeItem {
+    /// An existing heading located at `path`.
+    Node(NodePath),
+    /// A not-yet-committed heading being typed, rendered at the given depth.
+    Ghost(usize),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClipboardItem {
     Task(Task),
     Section(Section),
-    Subsection(Subsection),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +30,9 @@ pub enum Mode {
     InputTask {
         editing_idx: Option<usize>,
         insert_idx: Option<usize>,
+        /// When inserting a new task, `above` decides whether it lands before
+        /// (`true`) or after (`false`) the currently selected task.
+        above: bool,
         buf: String,
         cursor: usize,
     },
@@ -39,14 +44,12 @@ pub enum Mode {
     },
 
     InputSection {
-        node: Option<TreeNode>,
-        insert_idx: Option<usize>,
-        buf: String,
-        cursor: usize,
-    },
-
-    InputSubsection {
-        parent_sec_idx: usize,
+        /// `Some(path)` when renaming an existing heading, `None` when creating
+        /// a new one.
+        node: Option<NodePath>,
+        /// Parent of the new heading (`None` for a top-level heading).
+        parent: Option<NodePath>,
+        /// Index among the parent's children where the new heading lands.
         insert_idx: Option<usize>,
         buf: String,
         cursor: usize,
@@ -56,7 +59,7 @@ pub enum Mode {
 pub struct AppState {
     pub focus: Focus,
     pub mode: Mode,
-    pub tree_nodes: Vec<TreeNode>,
+    pub tree_items: Vec<TreeItem>,
     pub left_state: ListState,
     pub right_state: ListState,
 
@@ -80,7 +83,7 @@ impl AppState {
         Self {
             focus: Focus::Left,
             mode: Mode::Normal,
-            tree_nodes: Vec::new(),
+            tree_items: Vec::new(),
             left_state,
             right_state,
             pending_d: false,
@@ -98,7 +101,6 @@ mod tests {
     #[test]
     fn new_with_zero_sections_no_left_selection() {
         let app = AppState::new(0);
-
         assert!(app.left_state.selected().is_none());
     }
 
@@ -134,9 +136,9 @@ mod tests {
     }
 
     #[test]
-    fn tree_nodes_starts_empty() {
+    fn tree_items_starts_empty() {
         let app = AppState::new(2);
-        assert!(app.tree_nodes.is_empty());
+        assert!(app.tree_items.is_empty());
     }
 
     #[test]
@@ -145,19 +147,13 @@ mod tests {
     }
 
     #[test]
-    fn tree_node_section_equality() {
-        assert_eq!(TreeNode::Section(0), TreeNode::Section(0));
-        assert_ne!(TreeNode::Section(0), TreeNode::Section(1));
+    fn tree_item_node_equality() {
+        assert_eq!(TreeItem::Node(vec![0]), TreeItem::Node(vec![0]));
+        assert_ne!(TreeItem::Node(vec![0]), TreeItem::Node(vec![1]));
     }
 
     #[test]
-    fn tree_node_subsection_equality() {
-        assert_eq!(TreeNode::Subsection(0, 1), TreeNode::Subsection(0, 1));
-        assert_ne!(TreeNode::Subsection(0, 1), TreeNode::Subsection(0, 2));
-    }
-
-    #[test]
-    fn tree_node_section_vs_subsection() {
-        assert_ne!(TreeNode::Section(0), TreeNode::Subsection(0, 0));
+    fn tree_item_node_vs_ghost() {
+        assert_ne!(TreeItem::Node(vec![0]), TreeItem::Ghost(0));
     }
 }

@@ -1,7 +1,10 @@
 use crate::parser::{resolve_relative_date, write_file};
-use crate::task::{Section, Task, TodoList};
-use crate::tui::state::{AppState, Focus, Mode, TreeNode};
-use crate::tui::{get_task_from_ref_mut, get_task_refs, selected_node};
+use crate::task::{NodePath, Section, Task, TodoList};
+use crate::tui::state::{AppState, Focus, Mode};
+use crate::tui::{
+    build_tree_items, get_task_from_ref_mut, get_task_refs, insert_section, rebuild_and_select,
+    selected_node,
+};
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use std::path::Path;
@@ -56,6 +59,7 @@ pub fn handle_input_task(
     code: KeyCode,
     editing_idx: Option<usize>,
     insert_idx: Option<usize>,
+    above: bool,
     buf: &mut String,
     cursor: &mut usize,
 ) -> Result<()> {
@@ -70,42 +74,58 @@ pub fn handle_input_task(
             {
                 match editing_idx {
                     None => {
-                        match node {
-                            TreeNode::Section(s) => {
-                                let sec = &mut todo_list.sections[s];
-                                let new_task = Task {
+                        let refs = get_task_refs(todo_list, &node);
+
+                        // Anchor the new task relative to the ghost row encoded
+                        // by `insert_idx` (NOT the live `right_state`, which the
+                        // render loop moves to the ghost position during input).
+                        let anchor = match insert_idx {
+                            Some(p) => {
+                                if above {
+                                    p
+                                } else {
+                                    p.saturating_sub(1)
+                                }
+                            }
+                            None => refs.len(),
+                        };
+
+                        let (target_node, ins_idx) = if let Some(r) = refs.get(anchor) {
+                            let base = r.task_idx;
+                            (r.node.clone(), if above { base } else { base + 1 })
+                        } else {
+                            // No anchor row (empty list or end of list): append
+                            // to the currently selected node.
+                            let n = node_task_count(todo_list, &node);
+                            (node.clone(), n)
+                        };
+
+                        if let Some(sec) = crate::task::get_node_mut(todo_list, &target_node) {
+                            sec.tasks.insert(
+                                ins_idx,
+                                Task {
                                     text,
                                     is_done: false,
                                     due: None,
-                                };
-                                if let Some(i) = insert_idx {
-                                    let i = i.min(sec.tasks.len());
-                                    sec.tasks.insert(i, new_task);
-                                } else {
-                                    sec.tasks.push(new_task);
-                                }
-                            }
-                            TreeNode::Subsection(s, sb) => {
-                                let sub = &mut todo_list.sections[s].subsections[sb];
-                                let new_task = Task {
-                                    text,
-                                    is_done: false,
-                                    due: None,
-                                };
-                                if let Some(i) = insert_idx {
-                                    let i = i.min(sub.tasks.len());
-                                    sub.tasks.insert(i, new_task);
-                                } else {
-                                    sub.tasks.push(new_task);
-                                }
-                            }
+                                },
+                            );
                         }
                         write_file(path, todo_list)?;
-                        let new_len = get_task_refs(todo_list, node).len();
-                        app.right_state.select(Some(new_len.saturating_sub(1)));
+                        app.tree_items = build_tree_items(todo_list, &app.mode);
+                        let new_refs = get_task_refs(todo_list, &node);
+                        if let Some(pos) = new_refs
+                            .iter()
+                            .position(|r| r.node == target_node && r.task_idx == ins_idx)
+                        {
+                            app.right_state.select(Some(pos));
+                        } else {
+                            app.right_state
+                                .select(Some(insert_idx.unwrap_or(new_refs.len()).min(new_refs.len())));
+                        }
+                        app.focus = Focus::Right;
                     }
                     Some(idx) => {
-                        let refs = get_task_refs(todo_list, node);
+                        let refs = get_task_refs(todo_list, &node);
                         if let Some(ref_item) = refs.get(idx) {
                             let task = get_task_from_ref_mut(todo_list, ref_item);
                             task.text = text;
@@ -115,10 +135,6 @@ pub fn handle_input_task(
                 }
             }
             app.mode = Mode::Normal;
-
-            if editing_idx.is_none() {
-                app.focus = Focus::Right;
-            }
         }
         KeyCode::Char(c) => {
             insert_at_cursor(buf, cursor, c);
@@ -148,6 +164,7 @@ pub fn handle_input_task(
         app.mode = Mode::InputTask {
             editing_idx,
             insert_idx,
+            above,
             buf: buf.clone(),
             cursor: *cursor,
         };
@@ -170,7 +187,7 @@ pub fn handle_input_due(
         }
         KeyCode::Enter => {
             if let Some(node) = selected_node(app) {
-                let refs = get_task_refs(todo_list, node);
+                let refs = get_task_refs(todo_list, &node);
                 if let Some(ref_item) = refs.get(task_idx) {
                     let task = get_task_from_ref_mut(todo_list, ref_item);
                     let trimmed = buf.trim();
@@ -223,7 +240,8 @@ pub fn handle_input_section(
     todo_list: &mut TodoList,
     path: &Path,
     code: KeyCode,
-    node: Option<TreeNode>,
+    node: Option<NodePath>,
+    parent: Option<NodePath>,
     insert_idx: Option<usize>,
     buf: &mut String,
     cursor: &mut usize,
@@ -253,47 +271,26 @@ pub fn handle_input_section(
         KeyCode::Enter => {
             let name = buf.trim().to_string();
             if !name.is_empty() {
-                match node {
+                match &node {
                     None => {
-                        let new_sec = Section {
-                            name,
-                            tasks: Vec::new(),
-                            subsections: Vec::new(),
-                        };
-                        let new_s = if let Some(i) = insert_idx {
-                            let i = i.min(todo_list.sections.len());
-                            todo_list.sections.insert(i, new_sec);
-                            i
-                        } else {
-                            todo_list.sections.push(new_sec);
-                            todo_list.sections.len() - 1
-                        };
+                        let new_path = insert_section(
+                            todo_list,
+                            parent.as_ref(),
+                            insert_idx.unwrap_or(usize::MAX),
+                            Section::new(name),
+                        );
                         write_file(path, todo_list)?;
-
                         app.mode = Mode::Normal;
-                        let temp = crate::tui::build_tree_nodes(todo_list, &app.mode);
-                        let tree_pos = temp
-                            .iter()
-                            .position(|n| matches!(n, TreeNode::Section(s) if *s == new_s));
-                        if let Some(pos) = tree_pos {
-                            app.left_state.select(Some(pos));
-                        }
+                        rebuild_and_select(app, todo_list, &new_path);
+                        app.right_state.select(Some(0));
                     }
-
-                    Some(TreeNode::Section(s)) => {
-                        if s < todo_list.sections.len() {
-                            todo_list.sections[s].name = name;
+                    Some(existing) => {
+                        if let Some(sec) = crate::task::get_node_mut(todo_list, existing) {
+                            sec.name = name;
                             write_file(path, todo_list)?;
                         }
-                    }
-
-                    Some(TreeNode::Subsection(s, sb)) => {
-                        if s < todo_list.sections.len()
-                            && sb < todo_list.sections[s].subsections.len()
-                        {
-                            todo_list.sections[s].subsections[sb].name = name;
-                            write_file(path, todo_list)?;
-                        }
+                        app.mode = Mode::Normal;
+                        rebuild_and_select(app, todo_list, existing);
                     }
                 }
             }
@@ -308,6 +305,7 @@ pub fn handle_input_section(
     if matches!(app.mode, Mode::InputSection { .. }) {
         app.mode = Mode::InputSection {
             node,
+            parent,
             insert_idx,
             buf: buf.clone(),
             cursor: *cursor,
@@ -316,90 +314,17 @@ pub fn handle_input_section(
     Ok(())
 }
 
-pub fn handle_input_subsection(
-    app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
-    code: KeyCode,
-    parent_sec_idx: usize,
-    insert_idx: Option<usize>,
-    buf: &mut String,
-    cursor: &mut usize,
-) -> Result<()> {
-    match code {
-        KeyCode::Esc => {
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Backspace => {
-            backspace_at_cursor(buf, cursor);
-        }
-        KeyCode::Delete => {
-            delete_at_cursor(buf, cursor);
-        }
-        KeyCode::Left => {
-            move_left(cursor);
-        }
-        KeyCode::Right => {
-            move_right(cursor, buf);
-        }
-        KeyCode::Home => {
-            *cursor = 0;
-        }
-        KeyCode::End => {
-            *cursor = buf.chars().count();
-        }
-        KeyCode::Enter => {
-            let name = buf.trim().to_string();
-            if !name.is_empty() && parent_sec_idx < todo_list.sections.len() {
-                let new_sub = crate::task::Subsection {
-                    name,
-                    tasks: Vec::new(),
-                };
-                let new_sub_idx = if let Some(i) = insert_idx {
-                    let i = i.min(todo_list.sections[parent_sec_idx].subsections.len());
-                    todo_list.sections[parent_sec_idx]
-                        .subsections
-                        .insert(i, new_sub);
-                    i
-                } else {
-                    todo_list.sections[parent_sec_idx].subsections.push(new_sub);
-                    todo_list.sections[parent_sec_idx].subsections.len() - 1
-                };
-                write_file(path, todo_list)?;
-
-                app.mode = Mode::Normal;
-                let temp_tree = crate::tui::build_tree_nodes(todo_list, &app.mode);
-                let target_node = TreeNode::Subsection(parent_sec_idx, new_sub_idx);
-                if let Some(pos) = temp_tree.iter().position(|n| *n == target_node) {
-                    app.left_state.select(Some(pos));
-                }
-            }
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Char(c) => {
-            insert_at_cursor(buf, cursor, c);
-        }
-        _ => {}
-    }
-
-    if matches!(app.mode, Mode::InputSubsection { .. }) {
-        app.mode = Mode::InputSubsection {
-            parent_sec_idx,
-            insert_idx,
-            buf: buf.clone(),
-            cursor: *cursor,
-        };
-    }
-    Ok(())
+fn node_task_count(todo_list: &TodoList, node: &NodePath) -> usize {
+    crate::task::get_node(todo_list, node)
+        .map(|s| s.tasks.len())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parser::parse_file;
-    use crate::task::TodoList;
-    use crate::tui::build_tree_nodes;
-    use crate::tui::state::{AppState, Focus, Mode, TreeNode};
+use crate::tui::state::{AppState, Mode};
     use chrono::NaiveDate;
     use crossterm::event::KeyCode;
     use std::io::Write;
@@ -411,7 +336,7 @@ mod tests {
         f.flush().unwrap();
         let list = parse_file(f.path()).unwrap();
         let mut app = AppState::new(list.sections.len());
-        app.tree_nodes = build_tree_nodes(&list, &app.mode);
+        app.tree_items = build_tree_items(&list, &app.mode);
         (f, app, list)
     }
 
@@ -420,7 +345,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "typed".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -429,7 +354,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "hello".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "hell");
         assert_eq!(cursor, 4);
     }
@@ -439,7 +364,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "hello".to_string();
         let mut cursor = 0;
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "hello");
         assert_eq!(cursor, 0);
     }
@@ -449,8 +374,8 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "ac".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Left, None, None, &mut buf, &mut cursor).unwrap();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('b'), None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Left, None, None, false, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('b'), None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "abc");
         assert_eq!(cursor, 2);
     }
@@ -460,7 +385,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "abc".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Right, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Right, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "abc");
         assert_eq!(cursor, 3);
     }
@@ -470,9 +395,9 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "hello".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Home, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Home, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(cursor, 0);
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::End, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::End, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(cursor, 5);
     }
 
@@ -481,7 +406,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "abc".to_string();
         let mut cursor = 1;
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Delete, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Delete, None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "ac");
         assert_eq!(cursor, 1);
     }
@@ -491,7 +416,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "hel".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('l'), None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('l'), None, None, false, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "hell");
         assert_eq!(cursor, 4);
     }
@@ -500,9 +425,10 @@ mod tests {
     fn input_task_enter_adds_new_task() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         app.focus = Focus::Right;
+        app.right_state.select(Some(0));
         let mut buf = "New task".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, Some(1), false, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 2);
@@ -514,7 +440,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "   ".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, false, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 1);
     }
@@ -523,17 +449,65 @@ mod tests {
     fn input_task_enter_edits_existing_task() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Old text\n");
         app.focus = Focus::Right;
+        app.right_state.select(Some(0));
         let mut buf = "Updated text".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, Some(0), None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, Some(0), None, false, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks[0].text, "Updated text");
+    }
+
+    #[test]
+    fn input_task_enter_appends_to_nested_node() {
+        let (f, mut app, mut list) = setup("# main\n## sub\n- [ ] sub task\n");
+        app.focus = Focus::Right;
+        // select the nested node [0,0]
+        app.tree_items = build_tree_items(&list, &app.mode);
+        let pos = app
+            .tree_items
+            .iter()
+            .position(|n| matches!(n, crate::tui::state::TreeItem::Node(p) if p == &vec![0, 0]))
+            .unwrap();
+        app.left_state.select(Some(pos));
+        app.right_state.select(Some(0));
+        let mut buf = "Another".to_string();
+        let mut cursor = buf.chars().count();
+        // append (insert_idx None)
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, false, &mut buf, &mut cursor).unwrap();
+        let parsed = parse_file(f.path()).unwrap();
+        assert_eq!(parsed.sections[0].children[0].tasks.len(), 2);
+        assert_eq!(parsed.sections[0].children[0].tasks[1].text, "Another");
+    }
+
+    #[test]
+    fn input_task_a_below_last_root_task_stays_in_root() {
+        // Regression: pressing 'a' on the last top-level task must not drop the
+        // new task into a sub-heading below it.
+        let (f, mut app, mut list) = setup("# main\n- [ ] A\n- [ ] B\n## sub\n- [ ] C\n");
+        app.focus = Focus::Right;
+        app.left_state.select(Some(0));
+        // cursor on B (the last direct root task)
+        app.right_state.select(Some(1));
+
+        let mut buf = "New".to_string();
+        let mut cursor = buf.chars().count();
+        // 'a' => insert_idx = cur + 1 = 2, above = false
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, Some(2), false, &mut buf, &mut cursor).unwrap();
+
+        let parsed = parse_file(f.path()).unwrap();
+        // New task should be a direct task of root, after B.
+        assert_eq!(parsed.sections[0].tasks.len(), 3);
+        assert_eq!(parsed.sections[0].tasks[2].text, "New");
+        // Not added to the sub-heading.
+        assert_eq!(parsed.sections[0].children[0].tasks.len(), 1);
+        assert_eq!(parsed.sections[0].children[0].tasks[0].text, "C");
     }
 
     #[test]
     fn input_due_enter_valid_date_sets_due() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
         app.focus = Focus::Right;
+        app.right_state.select(Some(0));
         let mut buf = "2025-06-15".to_string();
         let mut cursor = buf.chars().count();
         handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf, &mut cursor).unwrap();
@@ -545,6 +519,7 @@ mod tests {
     fn input_due_left_then_type_inserts() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
         app.focus = Focus::Right;
+        app.right_state.select(Some(0));
         let mut buf = "2025".to_string();
         let mut cursor = buf.chars().count();
         handle_input_due(&mut app, &mut list, f.path(), KeyCode::Left, 0, &mut buf, &mut cursor).unwrap();
@@ -557,6 +532,7 @@ mod tests {
     fn input_due_enter_empty_clears_due() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task due:2025-01-01\n");
         app.focus = Focus::Right;
+        app.right_state.select(Some(0));
         let mut buf = String::new();
         let mut cursor = 0;
         handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf, &mut cursor).unwrap();
@@ -568,6 +544,7 @@ mod tests {
     fn input_due_enter_invalid_sets_none() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
         app.focus = Focus::Right;
+        app.right_state.select(Some(0));
         let mut buf = "not-a-date".to_string();
         let mut cursor = buf.chars().count();
         handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf, &mut cursor).unwrap();
@@ -589,7 +566,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "work".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 2);
         assert_eq!(parsed.sections[1].name, "work");
@@ -600,7 +577,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "end".to_string();
         let mut cursor = 1;
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Char('m'), None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Char('m'), None, None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "emnd");
         assert_eq!(cursor, 2);
     }
@@ -610,7 +587,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# old_name\n");
         let mut buf = "new_name".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, Some(TreeNode::Section(0)), None, &mut buf, &mut cursor).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, Some(vec![0]), None, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].name, "new_name");
     }
@@ -620,7 +597,7 @@ mod tests {
         let (f, mut app, mut list) = setup("# first\n# third\n");
         let mut buf = "second".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, Some(1), &mut buf, &mut cursor).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, Some(1), &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 3);
         assert_eq!(parsed.sections[0].name, "first");
@@ -629,11 +606,24 @@ mod tests {
     }
 
     #[test]
+    fn input_section_creates_nested_child() {
+        let (f, mut app, mut list) = setup("# main\n");
+        let mut buf = "child".to_string();
+        let mut cursor = buf.chars().count();
+        // parent = [0], insert at 0 -> child of main
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, Some(vec![0]), Some(0), &mut buf, &mut cursor).unwrap();
+        let parsed = parse_file(f.path()).unwrap();
+        assert_eq!(parsed.sections[0].name, "main");
+        assert_eq!(parsed.sections[0].children.len(), 1);
+        assert_eq!(parsed.sections[0].children[0].name, "child");
+    }
+
+    #[test]
     fn input_section_esc_cancels() {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "partial".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -642,48 +632,8 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "   ".to_string();
         let mut cursor = buf.chars().count();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 1);
-    }
-
-    #[test]
-    fn input_subsection_enter_creates_subsection() {
-        let (f, mut app, mut list) = setup("# main\n");
-        let mut buf = "urgent".to_string();
-        let mut cursor = buf.chars().count();
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Enter, 0, None, &mut buf, &mut cursor).unwrap();
-        let parsed = parse_file(f.path()).unwrap();
-        assert_eq!(parsed.sections[0].subsections.len(), 1);
-        assert_eq!(parsed.sections[0].subsections[0].name, "urgent");
-    }
-
-    #[test]
-    fn input_subsection_left_then_type_inserts() {
-        let (f, mut app, mut list) = setup("# main\n");
-        let mut buf = "urgent".to_string();
-        let mut cursor = 3;
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Char('-'), 0, None, &mut buf, &mut cursor).unwrap();
-        assert_eq!(buf, "urg-ent");
-        assert_eq!(cursor, 4);
-    }
-
-    #[test]
-    fn input_subsection_esc_cancels() {
-        let (f, mut app, mut list) = setup("# main\n");
-        let mut buf = "partial".to_string();
-        let mut cursor = buf.chars().count();
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Esc, 0, None, &mut buf, &mut cursor).unwrap();
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn input_subsection_empty_name_does_not_create() {
-        let (f, mut app, mut list) = setup("# main\n");
-        let mut buf = "  ".to_string();
-        let mut cursor = buf.chars().count();
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Enter, 0, None, &mut buf, &mut cursor).unwrap();
-        let parsed = parse_file(f.path()).unwrap();
-        assert!(parsed.sections[0].subsections.is_empty());
     }
 }

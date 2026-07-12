@@ -1,6 +1,6 @@
-use crate::task::{Task, TodoList};
-use crate::tui::state::{AppState, Focus, Mode, TreeNode};
-use crate::tui::{get_task_from_ref, get_task_refs, selected_node, TaskRef};
+use crate::task::{NodePath, Task, TodoList};
+use crate::tui::state::{AppState, Focus, Mode};
+use crate::tui::{get_task_from_ref, get_task_refs, selected_node};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -14,28 +14,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     let in_task_input = matches!(app.mode, Mode::InputTask { .. } | Mode::InputDue { .. });
 
     let title = selected_node(app)
-        .map(|node| match node {
-            TreeNode::Section(s) => format!(
-                "  {}  ",
-                todo_list
-                    .sections
-                    .get(s)
-                    .map(|sec| sec.name.as_str())
-                    .unwrap_or("")
-            ),
-            TreeNode::Subsection(s, sb) => {
-                if s < todo_list.sections.len() {
-                    let sec = &todo_list.sections[s];
-                    if sb < sec.subsections.len() {
-                        format!("  {} › {}  ", sec.name, sec.subsections[sb].name)
-                    } else {
-                        format!("  {} › New Subsection  ", sec.name)
-                    }
-                } else {
-                    " Tasks ".to_string()
-                }
-            }
-        })
+        .map(|path| breadcrumb(todo_list, &path))
         .unwrap_or_else(|| " Tasks ".to_string());
 
     let border_color = if in_task_input || focused_normal {
@@ -47,7 +26,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            title,
+            format!("  {}  ", title),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -55,7 +34,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         .border_style(Style::default().fg(border_color));
 
     let task_refs = selected_node(app)
-        .map(|node| get_task_refs(todo_list, node))
+        .map(|node| get_task_refs(todo_list, &node))
         .unwrap_or_default();
 
     let inner_w = area.width.saturating_sub(6) as usize;
@@ -96,26 +75,13 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         .enumerate()
         .map(|(i, ref_item)| {
             let task = get_task_from_ref(todo_list, ref_item);
-            let sub_name = if matches!(selected_node(app), Some(TreeNode::Section(_))) {
-                match ref_item {
-                    TaskRef::SubsectionTask { sec_idx, sub_idx, .. } => {
-                        todo_list.sections.get(*sec_idx)
-                            .and_then(|s| s.subsections.get(*sub_idx))
-                            .map(|sub| sub.name.as_str())
-                    }
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
             if Some(i) == editing_idx {
                 render_editing_row(
                     edit_buf.as_deref().unwrap_or(""),
                     edit_cursor,
                     task.is_done,
                     inner_w,
-                    sub_name,
+                    ref_item.sub_name.as_deref(),
                 )
             } else if Some(i) == due_editing_idx {
                 render_due_editing_row(
@@ -123,10 +89,10 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
                     due_buf.as_deref().unwrap_or(""),
                     due_cursor,
                     inner_w,
-                    sub_name,
+                    ref_item.sub_name.as_deref(),
                 )
             } else {
-                render_task_item(task, inner_w, sub_name)
+                render_task_item(task, inner_w, ref_item.sub_name.as_deref())
             }
         })
         .collect();
@@ -134,6 +100,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     if let Mode::InputTask {
         editing_idx: None,
         insert_idx,
+        above: _,
         ref buf,
         cursor,
     } = app.mode
@@ -178,6 +145,22 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     f.render_stateful_widget(list, area, &mut app.right_state);
 }
 
+/// Build a " › "-separated title from the heading path.
+fn breadcrumb(todo_list: &TodoList, path: &NodePath) -> String {
+    let mut parts = Vec::new();
+    for (depth, idx) in path.iter().enumerate() {
+        let node = if depth == 0 {
+            todo_list.sections.get(*idx)
+        } else {
+            crate::task::get_node(todo_list, &path[..depth + 1])
+        };
+        if let Some(sec) = node {
+            parts.push(sec.name.clone());
+        }
+    }
+    parts.join(" › ")
+}
+
 fn render_task_item(task: &Task, width: usize, sub_name: Option<&str>) -> ListItem<'static> {
     let (box_ch, box_style) = if task.is_done {
         ("  x ", Style::default().fg(Color::Green))
@@ -189,9 +172,9 @@ fn render_task_item(task: &Task, width: usize, sub_name: Option<&str>) -> ListIt
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::CROSSED_OUT)
-        } else {
-            Style::default().fg(Color::Reset)
-        };
+    } else {
+        Style::default().fg(Color::Reset)
+    };
 
     let due_info: Option<(String, Style)> = task.due.map(|d| {
         let today = chrono::Local::now().date_naive();
