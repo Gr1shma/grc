@@ -6,6 +6,49 @@ use anyhow::Result;
 use crossterm::event::KeyCode;
 use std::path::Path;
 
+fn char_to_byte(buf: &str, char_idx: usize) -> usize {
+    buf.char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(buf.len())
+}
+
+fn insert_at_cursor(buf: &mut String, cursor: &mut usize, c: char) {
+    let byte = char_to_byte(buf, *cursor);
+    buf.insert(byte, c);
+    *cursor += 1;
+}
+
+fn backspace_at_cursor(buf: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let start = char_to_byte(buf, *cursor - 1);
+    let end = char_to_byte(buf, *cursor);
+    buf.replace_range(start..end, "");
+    *cursor -= 1;
+}
+
+fn delete_at_cursor(buf: &mut String, cursor: &mut usize) {
+    if *cursor >= buf.chars().count() {
+        return;
+    }
+    let start = char_to_byte(buf, *cursor);
+    let end = char_to_byte(buf, *cursor + 1);
+    buf.replace_range(start..end, "");
+}
+
+fn move_left(cursor: &mut usize) {
+    *cursor = cursor.saturating_sub(1);
+}
+
+fn move_right(cursor: &mut usize, buf: &str) {
+    let max = buf.chars().count();
+    if *cursor < max {
+        *cursor += 1;
+    }
+}
+
 pub fn handle_input_task(
     app: &mut AppState,
     todo_list: &mut TodoList,
@@ -14,18 +57,11 @@ pub fn handle_input_task(
     editing_idx: Option<usize>,
     insert_idx: Option<usize>,
     buf: &mut String,
+    cursor: &mut usize,
 ) -> Result<()> {
     match code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
-        }
-        KeyCode::Backspace => {
-            buf.pop();
-            app.mode = Mode::InputTask {
-                editing_idx,
-                insert_idx,
-                buf: buf.clone(),
-            };
         }
         KeyCode::Enter => {
             let text = buf.trim().to_string();
@@ -85,20 +121,36 @@ pub fn handle_input_task(
             }
         }
         KeyCode::Char(c) => {
-            buf.push(c);
-            app.mode = Mode::InputTask {
-                editing_idx,
-                insert_idx,
-                buf: buf.clone(),
-            };
+            insert_at_cursor(buf, cursor, c);
         }
-        _ => {
-            app.mode = Mode::InputTask {
-                editing_idx,
-                insert_idx,
-                buf: buf.clone(),
-            };
+        KeyCode::Backspace => {
+            backspace_at_cursor(buf, cursor);
         }
+        KeyCode::Delete => {
+            delete_at_cursor(buf, cursor);
+        }
+        KeyCode::Left => {
+            move_left(cursor);
+        }
+        KeyCode::Right => {
+            move_right(cursor, buf);
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+        }
+        KeyCode::End => {
+            *cursor = buf.chars().count();
+        }
+        _ => {}
+    }
+
+    if matches!(app.mode, Mode::InputTask { .. }) {
+        app.mode = Mode::InputTask {
+            editing_idx,
+            insert_idx,
+            buf: buf.clone(),
+            cursor: *cursor,
+        };
     }
     Ok(())
 }
@@ -110,17 +162,11 @@ pub fn handle_input_due(
     code: KeyCode,
     task_idx: usize,
     buf: &mut String,
+    cursor: &mut usize,
 ) -> Result<()> {
     match code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
-        }
-        KeyCode::Backspace => {
-            buf.pop();
-            app.mode = Mode::InputDue {
-                task_idx,
-                buf: buf.clone(),
-            };
         }
         KeyCode::Enter => {
             if let Some(node) = selected_node(app) {
@@ -139,18 +185,35 @@ pub fn handle_input_due(
             app.mode = Mode::Normal;
         }
         KeyCode::Char(c) => {
-            buf.push(c);
-            app.mode = Mode::InputDue {
-                task_idx,
-                buf: buf.clone(),
-            };
+            insert_at_cursor(buf, cursor, c);
         }
-        _ => {
-            app.mode = Mode::InputDue {
-                task_idx,
-                buf: buf.clone(),
-            };
+        KeyCode::Backspace => {
+            backspace_at_cursor(buf, cursor);
         }
+        KeyCode::Delete => {
+            delete_at_cursor(buf, cursor);
+        }
+        KeyCode::Left => {
+            move_left(cursor);
+        }
+        KeyCode::Right => {
+            move_right(cursor, buf);
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+        }
+        KeyCode::End => {
+            *cursor = buf.chars().count();
+        }
+        _ => {}
+    }
+
+    if matches!(app.mode, Mode::InputDue { .. }) {
+        app.mode = Mode::InputDue {
+            task_idx,
+            buf: buf.clone(),
+            cursor: *cursor,
+        };
     }
     Ok(())
 }
@@ -163,18 +226,29 @@ pub fn handle_input_section(
     node: Option<TreeNode>,
     insert_idx: Option<usize>,
     buf: &mut String,
+    cursor: &mut usize,
 ) -> Result<()> {
     match code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
         }
         KeyCode::Backspace => {
-            buf.pop();
-            app.mode = Mode::InputSection {
-                node,
-                insert_idx,
-                buf: buf.clone(),
-            };
+            backspace_at_cursor(buf, cursor);
+        }
+        KeyCode::Delete => {
+            delete_at_cursor(buf, cursor);
+        }
+        KeyCode::Left => {
+            move_left(cursor);
+        }
+        KeyCode::Right => {
+            move_right(cursor, buf);
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+        }
+        KeyCode::End => {
+            *cursor = buf.chars().count();
         }
         KeyCode::Enter => {
             let name = buf.trim().to_string();
@@ -226,20 +300,18 @@ pub fn handle_input_section(
             app.mode = Mode::Normal;
         }
         KeyCode::Char(c) => {
-            buf.push(c);
-            app.mode = Mode::InputSection {
-                node,
-                insert_idx,
-                buf: buf.clone(),
-            };
+            insert_at_cursor(buf, cursor, c);
         }
-        _ => {
-            app.mode = Mode::InputSection {
-                node,
-                insert_idx,
-                buf: buf.clone(),
-            };
-        }
+        _ => {}
+    }
+
+    if matches!(app.mode, Mode::InputSection { .. }) {
+        app.mode = Mode::InputSection {
+            node,
+            insert_idx,
+            buf: buf.clone(),
+            cursor: *cursor,
+        };
     }
     Ok(())
 }
@@ -252,18 +324,29 @@ pub fn handle_input_subsection(
     parent_sec_idx: usize,
     insert_idx: Option<usize>,
     buf: &mut String,
+    cursor: &mut usize,
 ) -> Result<()> {
     match code {
         KeyCode::Esc => {
             app.mode = Mode::Normal;
         }
         KeyCode::Backspace => {
-            buf.pop();
-            app.mode = Mode::InputSubsection {
-                parent_sec_idx,
-                insert_idx,
-                buf: buf.clone(),
-            };
+            backspace_at_cursor(buf, cursor);
+        }
+        KeyCode::Delete => {
+            delete_at_cursor(buf, cursor);
+        }
+        KeyCode::Left => {
+            move_left(cursor);
+        }
+        KeyCode::Right => {
+            move_right(cursor, buf);
+        }
+        KeyCode::Home => {
+            *cursor = 0;
+        }
+        KeyCode::End => {
+            *cursor = buf.chars().count();
         }
         KeyCode::Enter => {
             let name = buf.trim().to_string();
@@ -294,20 +377,18 @@ pub fn handle_input_subsection(
             app.mode = Mode::Normal;
         }
         KeyCode::Char(c) => {
-            buf.push(c);
-            app.mode = Mode::InputSubsection {
-                parent_sec_idx,
-                insert_idx,
-                buf: buf.clone(),
-            };
+            insert_at_cursor(buf, cursor, c);
         }
-        _ => {
-            app.mode = Mode::InputSubsection {
-                parent_sec_idx,
-                insert_idx,
-                buf: buf.clone(),
-            };
-        }
+        _ => {}
+    }
+
+    if matches!(app.mode, Mode::InputSubsection { .. }) {
+        app.mode = Mode::InputSubsection {
+            parent_sec_idx,
+            insert_idx,
+            buf: buf.clone(),
+            cursor: *cursor,
+        };
     }
     Ok(())
 }
@@ -337,8 +418,9 @@ mod tests {
     #[test]
     fn input_task_esc_returns_to_normal() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
-        app.mode = Mode::InputTask { editing_idx: None, insert_idx: None, buf: "typed".into() };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, &mut "typed".to_string()).unwrap();
+        let mut buf = "typed".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -346,16 +428,72 @@ mod tests {
     fn input_task_backspace_pops_char() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "hello".to_string();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "hell");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
+    fn input_task_backspace_at_start_is_noop() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        let mut buf = "hello".to_string();
+        let mut cursor = 0;
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Backspace, None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "hello");
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn input_task_left_then_type_inserts_in_middle() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        let mut buf = "ac".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Left, None, None, &mut buf, &mut cursor).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('b'), None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
+    fn input_task_right_at_end_is_noop() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        let mut buf = "abc".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Right, None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "abc");
+        assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn input_task_home_and_end_move_cursor() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        let mut buf = "hello".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Home, None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(cursor, 0);
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::End, None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(cursor, 5);
+    }
+
+    #[test]
+    fn input_task_delete_removes_char_after_cursor() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        let mut buf = "abc".to_string();
+        let mut cursor = 1;
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Delete, None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "ac");
+        assert_eq!(cursor, 1);
     }
 
     #[test]
     fn input_task_char_appends_to_buf() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "hel".to_string();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('l'), None, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Char('l'), None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(buf, "hell");
+        assert_eq!(cursor, 4);
     }
 
     #[test]
@@ -363,7 +501,8 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         app.focus = Focus::Right;
         let mut buf = "New task".to_string();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 2);
@@ -374,7 +513,8 @@ mod tests {
     fn input_task_enter_empty_buf_does_not_add() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
         let mut buf = "   ".to_string();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 1);
     }
@@ -384,7 +524,8 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Old text\n");
         app.focus = Focus::Right;
         let mut buf = "Updated text".to_string();
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, Some(0), None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, Some(0), None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks[0].text, "Updated text");
     }
@@ -394,9 +535,22 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
         app.focus = Focus::Right;
         let mut buf = "2025-06-15".to_string();
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks[0].due, Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()));
+    }
+
+    #[test]
+    fn input_due_left_then_type_inserts() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
+        app.focus = Focus::Right;
+        let mut buf = "2025".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Left, 0, &mut buf, &mut cursor).unwrap();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Char('-'), 0, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "202-5");
+        assert_eq!(cursor, 4);
     }
 
     #[test]
@@ -404,7 +558,8 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task due:2025-01-01\n");
         app.focus = Focus::Right;
         let mut buf = String::new();
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf).unwrap();
+        let mut cursor = 0;
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert!(parsed.sections[0].tasks[0].due.is_none());
     }
@@ -414,7 +569,8 @@ mod tests {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
         app.focus = Focus::Right;
         let mut buf = "not-a-date".to_string();
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, 0, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert!(parsed.sections[0].tasks[0].due.is_none());
     }
@@ -422,8 +578,9 @@ mod tests {
     #[test]
     fn input_due_esc_cancels() {
         let (f, mut app, mut list) = setup("# main\n- [ ] Task\n");
-        app.mode = Mode::InputDue { task_idx: 0, buf: "2025".into() };
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Esc, 0, &mut "2025".to_string()).unwrap();
+        let mut buf = "2025".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Esc, 0, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -431,17 +588,29 @@ mod tests {
     fn input_section_enter_creates_new_section() {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "work".to_string();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 2);
         assert_eq!(parsed.sections[1].name, "work");
     }
 
     #[test]
+    fn input_section_left_then_type_inserts() {
+        let (f, mut app, mut list) = setup("# main\n");
+        let mut buf = "end".to_string();
+        let mut cursor = 1;
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Char('m'), None, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "emnd");
+        assert_eq!(cursor, 2);
+    }
+
+    #[test]
     fn input_section_enter_renames_existing() {
         let (f, mut app, mut list) = setup("# old_name\n");
         let mut buf = "new_name".to_string();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, Some(TreeNode::Section(0)), None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, Some(TreeNode::Section(0)), None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].name, "new_name");
     }
@@ -450,7 +619,8 @@ mod tests {
     fn input_section_enter_with_insert_idx() {
         let (f, mut app, mut list) = setup("# first\n# third\n");
         let mut buf = "second".to_string();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, Some(1), &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, Some(1), &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 3);
         assert_eq!(parsed.sections[0].name, "first");
@@ -461,7 +631,9 @@ mod tests {
     #[test]
     fn input_section_esc_cancels() {
         let (f, mut app, mut list) = setup("# main\n");
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, &mut "partial".to_string()).unwrap();
+        let mut buf = "partial".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Esc, None, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -469,7 +641,8 @@ mod tests {
     fn input_section_empty_name_does_not_create() {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "   ".to_string();
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, None, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 1);
     }
@@ -478,16 +651,29 @@ mod tests {
     fn input_subsection_enter_creates_subsection() {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "urgent".to_string();
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Enter, 0, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Enter, 0, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].subsections.len(), 1);
         assert_eq!(parsed.sections[0].subsections[0].name, "urgent");
     }
 
     #[test]
+    fn input_subsection_left_then_type_inserts() {
+        let (f, mut app, mut list) = setup("# main\n");
+        let mut buf = "urgent".to_string();
+        let mut cursor = 3;
+        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Char('-'), 0, None, &mut buf, &mut cursor).unwrap();
+        assert_eq!(buf, "urg-ent");
+        assert_eq!(cursor, 4);
+    }
+
+    #[test]
     fn input_subsection_esc_cancels() {
         let (f, mut app, mut list) = setup("# main\n");
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Esc, 0, None, &mut "partial".to_string()).unwrap();
+        let mut buf = "partial".to_string();
+        let mut cursor = buf.chars().count();
+        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Esc, 0, None, &mut buf, &mut cursor).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -495,7 +681,8 @@ mod tests {
     fn input_subsection_empty_name_does_not_create() {
         let (f, mut app, mut list) = setup("# main\n");
         let mut buf = "  ".to_string();
-        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Enter, 0, None, &mut buf).unwrap();
+        let mut cursor = buf.chars().count();
+        handle_input_subsection(&mut app, &mut list, f.path(), KeyCode::Enter, 0, None, &mut buf, &mut cursor).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert!(parsed.sections[0].subsections.is_empty());
     }

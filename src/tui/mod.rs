@@ -62,6 +62,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     editing_idx,
                     insert_idx,
                     mut buf,
+                    mut cursor,
                 } => {
                     input::handle_input_task(
                         &mut app,
@@ -71,10 +72,15 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         editing_idx,
                         insert_idx,
                         &mut buf,
+                        &mut cursor,
                     )?;
                     false
                 }
-                Mode::InputDue { task_idx, mut buf } => {
+                Mode::InputDue {
+                    task_idx,
+                    mut buf,
+                    mut cursor,
+                } => {
                     input::handle_input_due(
                         &mut app,
                         &mut todo_list,
@@ -82,6 +88,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         key.code,
                         task_idx,
                         &mut buf,
+                        &mut cursor,
                     )?;
                     false
                 }
@@ -89,6 +96,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     node,
                     insert_idx,
                     mut buf,
+                    mut cursor,
                 } => {
                     input::handle_input_section(
                         &mut app,
@@ -98,6 +106,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         node,
                         insert_idx,
                         &mut buf,
+                        &mut cursor,
                     )?;
                     false
                 }
@@ -105,6 +114,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     parent_sec_idx,
                     insert_idx,
                     mut buf,
+                    mut cursor,
                 } => {
                     input::handle_input_subsection(
                         &mut app,
@@ -114,6 +124,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         parent_sec_idx,
                         insert_idx,
                         &mut buf,
+                        &mut cursor,
                     )?;
                     false
                 }

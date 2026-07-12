@@ -70,6 +70,11 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     } else {
         None
     };
+    let edit_cursor = if let Mode::InputTask { cursor, .. } = &app.mode {
+        *cursor
+    } else {
+        0
+    };
     let due_editing_idx = if let Mode::InputDue { task_idx, .. } = &app.mode {
         Some(*task_idx)
     } else {
@@ -79,6 +84,11 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         Some(buf.clone())
     } else {
         None
+    };
+    let due_cursor = if let Mode::InputDue { cursor, .. } = &app.mode {
+        *cursor
+    } else {
+        0
     };
 
     let mut items: Vec<ListItem> = task_refs
@@ -100,9 +110,21 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
             };
 
             if Some(i) == editing_idx {
-                render_editing_row(edit_buf.as_deref().unwrap_or(""), task.is_done, inner_w, sub_name)
+                render_editing_row(
+                    edit_buf.as_deref().unwrap_or(""),
+                    edit_cursor,
+                    task.is_done,
+                    inner_w,
+                    sub_name,
+                )
             } else if Some(i) == due_editing_idx {
-                render_due_editing_row(task, due_buf.as_deref().unwrap_or(""), inner_w, sub_name)
+                render_due_editing_row(
+                    task,
+                    due_buf.as_deref().unwrap_or(""),
+                    due_cursor,
+                    inner_w,
+                    sub_name,
+                )
             } else {
                 render_task_item(task, inner_w, sub_name)
             }
@@ -113,9 +135,10 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         editing_idx: None,
         insert_idx,
         ref buf,
+        cursor,
     } = app.mode
     {
-        let ghost = render_ghost_row(buf, inner_w);
+        let ghost = render_ghost_row(buf, cursor, inner_w);
         let pos = insert_idx.unwrap_or(items.len()).min(items.len());
         items.insert(pos, ghost);
     }
@@ -206,27 +229,41 @@ fn render_task_item(task: &Task, width: usize, sub_name: Option<&str>) -> ListIt
     ListItem::new(Line::from(spans))
 }
 
-fn render_editing_row(buf: &str, is_done: bool, _width: usize, sub_name: Option<&str>) -> ListItem<'static> {
+fn render_editing_row(
+    buf: &str,
+    cursor: usize,
+    is_done: bool,
+    _width: usize,
+    sub_name: Option<&str>,
+) -> ListItem<'static> {
     let check = if is_done {
         Span::styled("  x ", Style::default().fg(Color::Green))
     } else {
         Span::styled("  ○ ", Style::default().fg(Color::DarkGray))
     };
+    let (before, after) = crate::tui::render::split_at_char(buf, cursor);
     let mut spans = vec![check];
     if let Some(name) = sub_name {
         spans.push(Span::styled(format!("[{}] ", name), Style::default().fg(Color::Magenta)));
     }
-    spans.push(Span::styled(buf.to_string(), Style::default().fg(Color::White)));
+    spans.push(Span::styled(before.to_string(), Style::default().fg(Color::White)));
     spans.push(Span::styled(
-        "█",
+        "|",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::SLOW_BLINK),
     ));
+    spans.push(Span::styled(after.to_string(), Style::default().fg(Color::White)));
     ListItem::new(Line::from(spans))
 }
 
-fn render_due_editing_row(task: &Task, due_buf: &str, width: usize, sub_name: Option<&str>) -> ListItem<'static> {
+fn render_due_editing_row(
+    task: &Task,
+    due_buf: &str,
+    cursor: usize,
+    width: usize,
+    sub_name: Option<&str>,
+) -> ListItem<'static> {
     let (box_ch, box_style) = if task.is_done {
         ("  x ", Style::default().fg(Color::Green))
     } else {
@@ -239,6 +276,8 @@ fn render_due_editing_row(task: &Task, due_buf: &str, width: usize, sub_name: Op
     let due_len = due_prefix.len() + due_buf.len() + 1;
     let pad = " ".repeat(width.saturating_sub(text_len + due_len));
 
+    let (before, after) = crate::tui::render::split_at_char(due_buf, cursor);
+
     let mut spans = vec![
         Span::styled(box_ch, box_style),
     ];
@@ -248,25 +287,28 @@ fn render_due_editing_row(task: &Task, due_buf: &str, width: usize, sub_name: Op
     spans.push(Span::styled(task.text.clone(), text_style));
     spans.push(Span::raw(pad));
     spans.push(Span::styled(due_prefix, Style::default().fg(Color::Blue)));
-    spans.push(Span::styled(due_buf.to_string(), Style::default().fg(Color::White)));
+    spans.push(Span::styled(before.to_string(), Style::default().fg(Color::White)));
     spans.push(Span::styled(
-        "█",
+        "|",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::SLOW_BLINK),
     ));
+    spans.push(Span::styled(after.to_string(), Style::default().fg(Color::White)));
     ListItem::new(Line::from(spans))
 }
 
-fn render_ghost_row(buf: &str, _width: usize) -> ListItem<'static> {
+fn render_ghost_row(buf: &str, cursor: usize, _width: usize) -> ListItem<'static> {
+    let (before, after) = crate::tui::render::split_at_char(buf, cursor);
     ListItem::new(Line::from(vec![
         Span::styled("  ○ ", Style::default().fg(Color::DarkGray)),
-        Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+        Span::styled(before.to_string(), Style::default().fg(Color::White)),
         Span::styled(
-            "█",
+            "|",
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::SLOW_BLINK),
         ),
+        Span::styled(after.to_string(), Style::default().fg(Color::White)),
     ]))
 }

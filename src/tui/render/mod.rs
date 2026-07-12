@@ -11,6 +11,15 @@ mod help;
 mod left;
 mod right;
 
+pub(crate) fn split_at_char(s: &str, char_idx: usize) -> (&str, &str) {
+    let byte = s
+        .char_indices()
+        .nth(char_idx)
+        .map(|(b, _)| b)
+        .unwrap_or(s.len());
+    (&s[..byte], &s[byte..])
+}
+
 pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &mut AppState) {
     let area = f.area();
 

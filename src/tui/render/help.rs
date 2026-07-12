@@ -69,6 +69,20 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from("    dd           - Delete selected task"),
         Line::from(""),
         Line::from(vec![Span::styled(
+            "  While Typing (any input mode):",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from("    |            - Bar cursor marks your insert position"),
+        Line::from("    Left / Right - Move cursor within the text (vim-style)"),
+        Line::from("    Home / End   - Jump to start / end of the text"),
+        Line::from("    Backspace    - Delete character before cursor"),
+        Line::from("    Delete       - Delete character at cursor"),
+        Line::from("    Enter        - Confirm input"),
+        Line::from("    Esc          - Cancel input"),
+        Line::from(""),
+        Line::from(vec![Span::styled(
             "  Due Date Formats (used with t):",
             Style::default()
                 .fg(Color::Cyan)

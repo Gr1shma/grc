@@ -42,22 +42,32 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
     } else {
         None
     };
+    let rename_cursor = if let Mode::InputSection { cursor, .. } = &app.mode {
+        *cursor
+    } else {
+        0
+    };
 
-    let (sec_ghost_node, sec_ghost_buf) = if let Mode::InputSection {
-        node: None, buf, ..
+    let (sec_ghost_node, sec_ghost_buf, sec_ghost_cursor) = if let Mode::InputSection {
+        node: None,
+        buf,
+        cursor,
+        ..
     } = &app.mode
     {
         (
             Some(TreeNode::Section(todo_list.sections.len())),
             Some(buf.clone()),
+            *cursor,
         )
     } else {
-        (None, None)
+        (None, None, 0)
     };
 
-    let (sub_ghost_node, sub_ghost_buf) = if let Mode::InputSubsection {
+    let (sub_ghost_node, sub_ghost_buf, sub_ghost_cursor) = if let Mode::InputSubsection {
         parent_sec_idx,
         buf,
+        cursor,
         ..
     } = &app.mode
     {
@@ -65,9 +75,10 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         (
             Some(TreeNode::Subsection(*parent_sec_idx, sub_len)),
             Some(buf.clone()),
+            *cursor,
         )
     } else {
-        (None, None)
+        (None, None, 0)
     };
 
     let items: Vec<ListItem> = app
@@ -75,7 +86,8 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         .iter()
         .map(|node| {
             if Some(*node) == sec_ghost_node {
-                let buf = sec_ghost_buf.as_deref().unwrap_or("");
+                let (before, after) =
+                    crate::tui::render::split_at_char(sec_ghost_buf.as_deref().unwrap_or(""), sec_ghost_cursor);
                 ListItem::new(Line::from(vec![
                     Span::styled(
                         "  ",
@@ -83,16 +95,18 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(before.to_string(), Style::default().fg(Color::White)),
                     Span::styled(
-                        "█",
+                        "|",
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::SLOW_BLINK),
                     ),
+                    Span::styled(after.to_string(), Style::default().fg(Color::White)),
                 ]))
             } else if Some(*node) == renaming_node {
-                let buf = rename_buf.as_deref().unwrap_or("");
+                let (before, after) =
+                    crate::tui::render::split_at_char(rename_buf.as_deref().unwrap_or(""), rename_cursor);
                 match node {
                     TreeNode::Section(_s) => {
                         let arrow = "  ";
@@ -103,43 +117,47 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
                                     .fg(Color::Yellow)
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+                            Span::styled(before.to_string(), Style::default().fg(Color::White)),
                             Span::styled(
-                                "█",
+                                "|",
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::SLOW_BLINK),
                             ),
+                            Span::styled(after.to_string(), Style::default().fg(Color::White)),
                         ]))
                     }
                     TreeNode::Subsection(_s, _sb) => {
                         let connector = "    ";
                         ListItem::new(Line::from(vec![
                             Span::styled(connector, Style::default().fg(Color::Blue)),
-                            Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+                            Span::styled(before.to_string(), Style::default().fg(Color::White)),
                             Span::styled(
-                                "█",
+                                "|",
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::SLOW_BLINK),
                             ),
+                            Span::styled(after.to_string(), Style::default().fg(Color::White)),
                         ]))
                     }
                 }
             } else if Some(*node) == sub_ghost_node {
-                let buf = sub_ghost_buf.as_deref().unwrap_or("");
+                let (before, after) =
+                    crate::tui::render::split_at_char(sub_ghost_buf.as_deref().unwrap_or(""), sub_ghost_cursor);
                 match node {
                     TreeNode::Subsection(_s, _sb) => {
                         let connector = "    ";
                         ListItem::new(Line::from(vec![
                             Span::styled(connector, Style::default().fg(Color::Blue)),
-                            Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+                            Span::styled(before.to_string(), Style::default().fg(Color::White)),
                             Span::styled(
-                                "█",
+                                "|",
                                 Style::default()
                                     .fg(Color::Green)
                                     .add_modifier(Modifier::SLOW_BLINK),
                             ),
+                            Span::styled(after.to_string(), Style::default().fg(Color::White)),
                         ]))
                     }
                     _ => ListItem::new(Line::from("")),

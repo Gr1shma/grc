@@ -84,6 +84,7 @@ pub fn handle_normal(
                     node: None,
                     insert_idx: None,
                     buf: String::new(),
+                    cursor: 0,
                 };
             }
 
@@ -97,6 +98,7 @@ pub fn handle_normal(
                         parent_sec_idx,
                         insert_idx: sub_idx,
                         buf: String::new(),
+                        cursor: 0,
                     };
                 }
             }
@@ -109,6 +111,7 @@ pub fn handle_normal(
                                 node: None,
                                 insert_idx: Some(s),
                                 buf: String::new(),
+                                cursor: 0,
                             };
                         }
                         TreeNode::Subsection(s, sb) => {
@@ -116,6 +119,7 @@ pub fn handle_normal(
                                 parent_sec_idx: s,
                                 insert_idx: Some(sb),
                                 buf: String::new(),
+                                cursor: 0,
                             };
                         }
                     }
@@ -128,7 +132,8 @@ pub fn handle_normal(
                     app.mode = Mode::InputSection {
                         node: Some(node),
                         insert_idx: None,
-                        buf: name,
+                        buf: name.clone(),
+                        cursor: name.chars().count(),
                     };
                 }
             }
@@ -195,6 +200,7 @@ pub fn handle_normal(
                     editing_idx: None,
                     insert_idx: Some(cur + 1),
                     buf: String::new(),
+                    cursor: 0,
                 };
             }
             KeyCode::Char('O') => {
@@ -203,6 +209,7 @@ pub fn handle_normal(
                     editing_idx: None,
                     insert_idx: Some(cur),
                     buf: String::new(),
+                    cursor: 0,
                 };
             }
             KeyCode::Char('A') => {
@@ -210,6 +217,7 @@ pub fn handle_normal(
                     editing_idx: None,
                     insert_idx: None,
                     buf: String::new(),
+                    cursor: 0,
                 };
             }
 
@@ -223,6 +231,7 @@ pub fn handle_normal(
                             editing_idx: Some(cur),
                             insert_idx: None,
                             buf: task.text.clone(),
+                            cursor: task.text.chars().count(),
                         };
                     }
                 }
@@ -240,7 +249,8 @@ pub fn handle_normal(
                             .unwrap_or_default();
                         app.mode = Mode::InputDue {
                             task_idx: cur,
-                            buf: existing,
+                            buf: existing.clone(),
+                            cursor: existing.chars().count(),
                         };
                     }
                 }

@@ -29,23 +29,27 @@ pub enum Mode {
         editing_idx: Option<usize>,
         insert_idx: Option<usize>,
         buf: String,
+        cursor: usize,
     },
 
     InputDue {
         task_idx: usize,
         buf: String,
+        cursor: usize,
     },
 
     InputSection {
         node: Option<TreeNode>,
         insert_idx: Option<usize>,
         buf: String,
+        cursor: usize,
     },
 
     InputSubsection {
         parent_sec_idx: usize,
         insert_idx: Option<usize>,
         buf: String,
+        cursor: usize,
     },
 }
 
