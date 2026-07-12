@@ -1,28 +1,25 @@
 use crate::task::{NodePath, Section, Task};
 use ratatui::widgets::ListState;
 
-#[derive(PartialEq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Focus {
     Left,
     Right,
 }
 
-/// A row in the left (tree) panel.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TreeItem {
-    /// An existing heading located at `path`.
     Node(NodePath),
-    /// A not-yet-committed heading being typed, rendered at the given depth.
     Ghost(usize),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClipboardItem {
     Task(Task),
     Section(Section),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     Normal,
     Help,
@@ -30,8 +27,6 @@ pub enum Mode {
     InputTask {
         editing_idx: Option<usize>,
         insert_idx: Option<usize>,
-        /// When inserting a new task, `above` decides whether it lands before
-        /// (`true`) or after (`false`) the currently selected task.
         above: bool,
         buf: String,
         cursor: usize,
@@ -44,12 +39,8 @@ pub enum Mode {
     },
 
     InputSection {
-        /// `Some(path)` when renaming an existing heading, `None` when creating
-        /// a new one.
         node: Option<NodePath>,
-        /// Parent of the new heading (`None` for a top-level heading).
         parent: Option<NodePath>,
-        /// Index among the parent's children where the new heading lands.
         insert_idx: Option<usize>,
         buf: String,
         cursor: usize,
@@ -70,6 +61,7 @@ pub struct AppState {
     pub pending_y: bool,
 
     pub clipboard: Option<ClipboardItem>,
+    pub help_scroll: u16,
 }
 
 impl AppState {
@@ -90,6 +82,7 @@ impl AppState {
             pending_g: false,
             pending_y: false,
             clipboard: None,
+            help_scroll: 0,
         }
     }
 }

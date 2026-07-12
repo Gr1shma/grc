@@ -3,7 +3,8 @@ pub mod render;
 pub mod state;
 
 use crate::parser::parse_file;
-use crate::task::{get_node, get_node_mut, NodePath, Section, Task, TodoList};
+use crate::task::{NodePath, Section, Task, TodoList, get_node, get_node_mut};
+use crate::tui::input::{InputDueParams, InputSectionParams, InputTaskParams};
 use crate::tui::state::{AppState, Mode, TreeItem};
 use anyhow::{Context, Result};
 use crossterm::{
@@ -55,6 +56,10 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         || key.code == event::KeyCode::Char('?')
                     {
                         app.mode = Mode::Normal;
+                    } else if key.code == event::KeyCode::Down || key.code == event::KeyCode::Char('j') {
+                        app.help_scroll = app.help_scroll.saturating_add(1);
+                    } else if key.code == event::KeyCode::Up || key.code == event::KeyCode::Char('k') {
+                        app.help_scroll = app.help_scroll.saturating_sub(1);
                     }
                     false
                 }
@@ -62,55 +67,58 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     editing_idx,
                     insert_idx,
                     above,
-                    mut buf,
-                    mut cursor,
+                    buf,
+                    cursor,
                 } => {
+                    let mut params = InputTaskParams {
+                        editing_idx,
+                        insert_idx,
+                        above,
+                        buf,
+                        cursor,
+                    };
                     input::handle_input_task(
                         &mut app,
                         &mut todo_list,
                         path,
                         key.code,
-                        editing_idx,
-                        insert_idx,
-                        above,
-                        &mut buf,
-                        &mut cursor,
+                        &mut params,
                     )?;
                     false
                 }
                 Mode::InputDue {
                     task_idx,
-                    mut buf,
-                    mut cursor,
+                    buf,
+                    cursor,
                 } => {
-                    input::handle_input_due(
-                        &mut app,
-                        &mut todo_list,
-                        path,
-                        key.code,
+                    let mut params = InputDueParams {
                         task_idx,
-                        &mut buf,
-                        &mut cursor,
-                    )?;
+                        buf,
+                        cursor,
+                    };
+                    input::handle_input_due(&mut app, &mut todo_list, path, key.code, &mut params)?;
                     false
                 }
                 Mode::InputSection {
                     node,
                     parent,
                     insert_idx,
-                    mut buf,
-                    mut cursor,
+                    buf,
+                    cursor,
                 } => {
+                    let mut params = InputSectionParams {
+                        node,
+                        parent,
+                        insert_idx,
+                        buf,
+                        cursor,
+                    };
                     input::handle_input_section(
                         &mut app,
                         &mut todo_list,
                         path,
                         key.code,
-                        node,
-                        parent,
-                        insert_idx,
-                        &mut buf,
-                        &mut cursor,
+                        &mut params,
                     )?;
                     false
                 }
@@ -150,9 +158,6 @@ fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
     }
 }
 
-/// Build the flat list of rows shown in the left panel. A `Ghost` row is
-/// inserted for a heading that is being created, so it appears at the position
-/// it will occupy once committed.
 pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
     let ghost = match mode {
         Mode::InputSection {
@@ -165,45 +170,38 @@ pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
     };
 
     let mut items = Vec::new();
-
-    fn walk(
-        items: &mut Vec<TreeItem>,
-        ghost: &Option<(Option<NodePath>, Option<usize>)>,
-        parent: Option<NodePath>,
-        children: &[Section],
-        depth: usize,
-    ) {
-        let n = children.len();
-        for i in 0..n {
-            if let Some((gp, gi)) = ghost {
-                if *gp == parent && *gi == Some(i) {
-                    items.push(TreeItem::Ghost(depth));
-                }
-            }
-            let mut p = parent.clone().unwrap_or_default();
-            p.push(i);
-            items.push(TreeItem::Node(p.clone()));
-            walk(
-                items,
-                ghost,
-                Some(p),
-                &children[i].children,
-                depth + 1,
-            );
-        }
-        if let Some((gp, gi)) = ghost {
-            if *gp == parent && (gi.is_none() || *gi == Some(n)) {
-                items.push(TreeItem::Ghost(depth));
-            }
-        }
-    }
-
-    walk(&mut items, &ghost, None, &todo_list.sections, 0);
+    walk_tree(&mut items, ghost.as_ref(), None, &todo_list.sections, 0);
     items
 }
 
-/// Rebuild the tree rows and select the row for `path` (used right after a
-/// heading is created or renamed).
+fn walk_tree(
+    items: &mut Vec<TreeItem>,
+    ghost: Option<&(Option<NodePath>, Option<usize>)>,
+    parent: Option<&NodePath>,
+    children: &[Section],
+    depth: usize,
+) {
+    let n = children.len();
+    for (i, child) in children.iter().enumerate() {
+        if let Some((gp, gi)) = ghost
+            && gp.as_deref() == parent.map(Vec::as_slice)
+            && *gi == Some(i)
+        {
+            items.push(TreeItem::Ghost(depth));
+        }
+        let mut p = parent.map_or_else(Vec::new, Clone::clone);
+        p.push(i);
+        items.push(TreeItem::Node(p.clone()));
+        walk_tree(items, ghost, Some(&p), &child.children, depth + 1);
+    }
+    if let Some((gp, gi)) = ghost
+        && gp.as_deref() == parent.map(Vec::as_slice)
+        && (gi.is_none() || *gi == Some(n))
+    {
+        items.push(TreeItem::Ghost(depth));
+    }
+}
+
 pub fn rebuild_and_select(app: &mut AppState, todo_list: &TodoList, path: &NodePath) {
     app.tree_items = build_tree_items(todo_list, &app.mode);
     if let Some(pos) = app
@@ -224,32 +222,22 @@ pub fn selected_node(app: &AppState) -> Option<NodePath> {
 }
 
 pub fn node_name(todo_list: &TodoList, node: &NodePath) -> String {
-    get_node(todo_list, node)
-        .map(|s| s.name.clone())
-        .unwrap_or_default()
+    get_node(todo_list, node).map_or_else(String::new, |s| s.name.clone())
 }
 
 pub fn count_tasks(sec: &Section) -> usize {
     sec.count_tasks()
 }
 
-/// Reference to a single task: the node that directly owns it plus its index
-/// within that node's `tasks`, and (for the flattened top-level view) the full
-/// nested path of sub-headings the task lives under, e.g. `backend › api`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TaskRef {
     pub node: NodePath,
     pub task_idx: usize,
     pub sub_name: Option<String>,
 }
 
-/// Tasks shown in the right panel for the selected heading.
-///
-/// * For a top-level heading (`path` of length 1) every task in the subtree is
-///   shown, flattened, with the owning sub-heading name tagged.
-/// * For any deeper heading only its own direct tasks are listed.
 pub fn get_task_refs(todo_list: &TodoList, node: &NodePath) -> Vec<TaskRef> {
-    if let Some(sec) = get_node(todo_list, node) {
+    get_node(todo_list, node).map_or_else(Vec::new, |sec| {
         if node.len() == 1 {
             let mut out = Vec::new();
             collect_flatten(todo_list, node, &mut out);
@@ -265,43 +253,36 @@ pub fn get_task_refs(todo_list: &TodoList, node: &NodePath) -> Vec<TaskRef> {
                 })
                 .collect()
         }
-    } else {
-        Vec::new()
-    }
+    })
 }
 
 fn collect_flatten(todo_list: &TodoList, node: &NodePath, out: &mut Vec<TaskRef>) {
     if let Some(sec) = get_node(todo_list, node) {
         let sub_name = node_breadcrumb(todo_list, node);
-        for (i, _task) in sec.tasks.iter().enumerate() {
+        for (i, _) in sec.tasks.iter().enumerate() {
             out.push(TaskRef {
                 node: node.clone(),
                 task_idx: i,
                 sub_name: sub_name.clone(),
             });
         }
-        for (ci, _child) in sec.children.iter().enumerate() {
-            let mut cp = node.to_vec();
+        let child_count = sec.children.len();
+        for ci in 0..child_count {
+            let mut cp = node.clone();
             cp.push(ci);
             collect_flatten(todo_list, &cp, out);
         }
     }
 }
 
-/// For a task owned by the section at `node`, return the joined path of
-/// sub-headings it is nested under (excluding the top-level `node[0]`), e.g.
-/// `backend › api`. Returns `None` for a task that lives directly under the
-/// top-level heading.
 fn node_breadcrumb(todo_list: &TodoList, node: &NodePath) -> Option<String> {
     if node.len() <= 1 {
         return None;
     }
-    let mut parts = Vec::new();
-    for k in 1..node.len() {
-        if let Some(sec) = get_node(todo_list, &node[..=k]) {
-            parts.push(sec.name.clone());
-        }
-    }
+    let parts: Vec<String> = (1..node.len())
+        .filter_map(|k| get_node(todo_list, &node[..=k]))
+        .map(|sec| sec.name.clone())
+        .collect();
     if parts.is_empty() {
         None
     } else {
@@ -315,17 +296,12 @@ pub fn get_task_from_ref<'a>(todo_list: &'a TodoList, ref_item: &TaskRef) -> &'a
         .tasks[ref_item.task_idx]
 }
 
-pub fn get_task_from_ref_mut<'a>(
-    todo_list: &'a mut TodoList,
-    ref_item: &TaskRef,
-) -> &'a mut Task {
+pub fn get_task_from_ref_mut<'a>(todo_list: &'a mut TodoList, ref_item: &TaskRef) -> &'a mut Task {
     &mut get_node_mut(todo_list, &ref_item.node)
         .expect("task ref node must exist")
         .tasks[ref_item.task_idx]
 }
 
-/// Insert `section` as a child of `parent` (`None` for top-level) at `idx`.
-/// Returns the path of the inserted node.
 pub fn insert_section(
     todo_list: &mut TodoList,
     parent: Option<&NodePath>,
@@ -342,14 +318,13 @@ pub fn insert_section(
             let sec = get_node_mut(todo_list, p).expect("parent must exist");
             let i = idx.min(sec.children.len());
             sec.children.insert(i, section);
-            let mut path = p.to_vec();
+            let mut path = p.clone();
             path.push(i);
             path
         }
     }
 }
 
-/// Remove the node at `path`, returning the removed section.
 pub fn remove_section(todo_list: &mut TodoList, path: &NodePath) -> Option<Section> {
     if path.is_empty() {
         return None;
@@ -370,12 +345,10 @@ pub fn remove_section(todo_list: &mut TodoList, path: &NodePath) -> Option<Secti
     }
 }
 
-/// Number of children a node has (top-level count when `path` is `None`).
 pub fn child_count(todo_list: &TodoList, path: Option<&NodePath>) -> usize {
-    match path {
-        None => todo_list.sections.len(),
-        Some(p) => get_node(todo_list, p).map(|s| s.children.len()).unwrap_or(0),
-    }
+    path.map_or(todo_list.sections.len(), |p| {
+        get_node(todo_list, p).map_or(0, |s| s.children.len())
+    })
 }
 
 #[cfg(test)]
@@ -512,18 +485,15 @@ mod tests {
         let list = sample_todo_list();
         let refs = get_task_refs(&list, &vec![0]);
         assert_eq!(refs.len(), 4);
-        // direct tasks of root (no sub-name tag)
         assert_eq!(refs[0].node, vec![0]);
         assert_eq!(refs[0].task_idx, 0);
         assert_eq!(refs[0].sub_name, None);
         assert_eq!(refs[1].node, vec![0]);
         assert_eq!(refs[1].task_idx, 1);
         assert_eq!(refs[1].sub_name, None);
-        // task inside first child "backend", tagged with its name
         assert_eq!(refs[2].node, vec![0, 0]);
         assert_eq!(refs[2].task_idx, 0);
         assert_eq!(refs[2].sub_name.as_deref(), Some("backend"));
-        // task inside grandchild backend->api, tagged with full path
         assert_eq!(refs[3].node, vec![0, 0, 0]);
         assert_eq!(refs[3].task_idx, 0);
         assert_eq!(refs[3].sub_name.as_deref(), Some("backend › api"));
@@ -583,7 +553,10 @@ mod tests {
         };
         let task = get_task_from_ref_mut(&mut list, &r);
         task.text = "Updated endpoint".to_string();
-        assert_eq!(list.sections[0].children[0].children[0].tasks[0].text, "Updated endpoint");
+        assert_eq!(
+            list.sections[0].children[0].children[0].tasks[0].text,
+            "Updated endpoint"
+        );
     }
 
     #[test]

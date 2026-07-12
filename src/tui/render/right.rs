@@ -13,9 +13,10 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     let focused_normal = app.focus == Focus::Right && matches!(app.mode, Mode::Normal);
     let in_task_input = matches!(app.mode, Mode::InputTask { .. } | Mode::InputDue { .. });
 
-    let title = selected_node(app)
-        .map(|path| breadcrumb(todo_list, &path))
-        .unwrap_or_else(|| " Tasks ".to_string());
+    let title = selected_node(app).map_or_else(
+        || " Tasks ".to_string(),
+        |path| breadcrumb(todo_list, &path),
+    );
 
     let border_color = if in_task_input || focused_normal {
         Color::Green
@@ -26,7 +27,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            format!("  {}  ", title),
+            format!("  {title}  "),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -39,63 +40,36 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
 
     let inner_w = area.width.saturating_sub(6) as usize;
 
-    let editing_idx = if let Mode::InputTask { editing_idx, .. } = &app.mode {
-        *editing_idx
-    } else {
-        None
-    };
-    let edit_buf = if let Mode::InputTask { buf, .. } = &app.mode {
-        Some(buf.clone())
-    } else {
-        None
-    };
-    let edit_cursor = if let Mode::InputTask { cursor, .. } = &app.mode {
-        *cursor
-    } else {
-        0
-    };
-    let due_editing_idx = if let Mode::InputDue { task_idx, .. } = &app.mode {
-        Some(*task_idx)
-    } else {
-        None
-    };
-    let due_buf = if let Mode::InputDue { buf, .. } = &app.mode {
-        Some(buf.clone())
-    } else {
-        None
-    };
-    let due_cursor = if let Mode::InputDue { cursor, .. } = &app.mode {
-        *cursor
-    } else {
-        0
+    let (editing_idx, edit_buf, edit_cursor) = match &app.mode {
+        Mode::InputTask {
+            editing_idx,
+            buf,
+            cursor,
+            ..
+        } => (*editing_idx, Some(buf.as_str()), *cursor),
+        _ => (None, None, 0),
     };
 
-    let mut items: Vec<ListItem> = task_refs
-        .iter()
-        .enumerate()
-        .map(|(i, ref_item)| {
-            let task = get_task_from_ref(todo_list, ref_item);
-            if Some(i) == editing_idx {
-                render_editing_row(
-                    edit_buf.as_deref().unwrap_or(""),
-                    edit_cursor,
-                    task.is_done,
-                    inner_w,
-                    ref_item.sub_name.as_deref(),
-                )
-            } else if Some(i) == due_editing_idx {
-                render_due_editing_row(
-                    task,
-                    due_buf.as_deref().unwrap_or(""),
-                    due_cursor,
-                    inner_w,
-                    ref_item.sub_name.as_deref(),
-                )
-            } else {
-                render_task_item(task, inner_w, ref_item.sub_name.as_deref())
-            }
-        })
-        .collect();
+    let (due_editing_idx, due_buf, due_cursor) = match &app.mode {
+        Mode::InputDue {
+            task_idx,
+            buf,
+            cursor,
+        } => (Some(*task_idx), Some(buf.as_str()), *cursor),
+        _ => (None, None, 0),
+    };
+
+    let mut items = build_task_list_items(
+        todo_list,
+        &task_refs,
+        editing_idx,
+        edit_buf,
+        edit_cursor,
+        due_editing_idx,
+        due_buf,
+        due_cursor,
+        inner_w,
+    );
 
     if let Mode::InputTask {
         editing_idx: None,
@@ -145,14 +119,52 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     f.render_stateful_widget(list, area, &mut app.right_state);
 }
 
-/// Build a " › "-separated title from the heading path.
+fn build_task_list_items(
+    todo_list: &TodoList,
+    task_refs: &[crate::tui::TaskRef],
+    editing_idx: Option<usize>,
+    edit_buf: Option<&str>,
+    edit_cursor: usize,
+    due_editing_idx: Option<usize>,
+    due_buf: Option<&str>,
+    due_cursor: usize,
+    inner_w: usize,
+) -> Vec<ListItem<'static>> {
+    task_refs
+        .iter()
+        .enumerate()
+        .map(|(i, ref_item)| {
+            let task = get_task_from_ref(todo_list, ref_item);
+            if Some(i) == editing_idx {
+                render_editing_row(
+                    edit_buf.unwrap_or(""),
+                    edit_cursor,
+                    task.is_done,
+                    inner_w,
+                    ref_item.sub_name.as_deref(),
+                )
+            } else if Some(i) == due_editing_idx {
+                render_due_editing_row(
+                    task,
+                    due_buf.unwrap_or(""),
+                    due_cursor,
+                    inner_w,
+                    ref_item.sub_name.as_deref(),
+                )
+            } else {
+                render_task_item(task, inner_w, ref_item.sub_name.as_deref())
+            }
+        })
+        .collect()
+}
+
 fn breadcrumb(todo_list: &TodoList, path: &NodePath) -> String {
     let mut parts = Vec::new();
     for (depth, idx) in path.iter().enumerate() {
         let node = if depth == 0 {
             todo_list.sections.get(*idx)
         } else {
-            crate::task::get_node(todo_list, &path[..depth + 1])
+            crate::task::get_node(todo_list, &path[..=depth])
         };
         if let Some(sec) = node {
             parts.push(sec.name.clone());
@@ -193,16 +205,17 @@ fn render_task_item(task: &Task, width: usize, sub_name: Option<&str>) -> ListIt
         (label, style)
     });
 
-    let sub_len = sub_name.map(|s| s.len() + 3).unwrap_or(0);
+    let sub_len = sub_name.map_or(0, |s| s.len() + 3);
     let text_len = box_ch.len() + sub_len + task.text.len();
-    let due_len = due_info.as_ref().map(|(s, _)| s.len()).unwrap_or(0);
+    let due_len = due_info.as_ref().map_or(0, |(s, _)| s.len());
     let pad = " ".repeat(width.saturating_sub(text_len + due_len));
 
-    let mut spans = vec![
-        Span::styled(box_ch, box_style),
-    ];
+    let mut spans = vec![Span::styled(box_ch, box_style)];
     if let Some(name) = sub_name {
-        spans.push(Span::styled(format!("[{}] ", name), Style::default().fg(Color::Magenta)));
+        spans.push(Span::styled(
+            format!("[{name}] "),
+            Style::default().fg(Color::Magenta),
+        ));
     }
     spans.push(Span::styled(task.text.clone(), text_style));
     spans.push(Span::raw(pad));
@@ -227,16 +240,25 @@ fn render_editing_row(
     let (before, after) = crate::tui::render::split_at_char(buf, cursor);
     let mut spans = vec![check];
     if let Some(name) = sub_name {
-        spans.push(Span::styled(format!("[{}] ", name), Style::default().fg(Color::Magenta)));
+        spans.push(Span::styled(
+            format!("[{name}] "),
+            Style::default().fg(Color::Magenta),
+        ));
     }
-    spans.push(Span::styled(before.to_string(), Style::default().fg(Color::White)));
+    spans.push(Span::styled(
+        before.to_string(),
+        Style::default().fg(Color::White),
+    ));
     spans.push(Span::styled(
         "|",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::SLOW_BLINK),
     ));
-    spans.push(Span::styled(after.to_string(), Style::default().fg(Color::White)));
+    spans.push(Span::styled(
+        after.to_string(),
+        Style::default().fg(Color::White),
+    ));
     ListItem::new(Line::from(spans))
 }
 
@@ -254,30 +276,37 @@ fn render_due_editing_row(
     };
     let text_style = Style::default().fg(Color::Reset);
     let due_prefix = "  due:";
-    let sub_len = sub_name.map(|s| s.len() + 3).unwrap_or(0);
+    let sub_len = sub_name.map_or(0, |s| s.len() + 3);
     let text_len = box_ch.len() + sub_len + task.text.len();
     let due_len = due_prefix.len() + due_buf.len() + 1;
     let pad = " ".repeat(width.saturating_sub(text_len + due_len));
 
     let (before, after) = crate::tui::render::split_at_char(due_buf, cursor);
 
-    let mut spans = vec![
-        Span::styled(box_ch, box_style),
-    ];
+    let mut spans = vec![Span::styled(box_ch, box_style)];
     if let Some(name) = sub_name {
-        spans.push(Span::styled(format!("[{}] ", name), Style::default().fg(Color::Magenta)));
+        spans.push(Span::styled(
+            format!("[{name}] "),
+            Style::default().fg(Color::Magenta),
+        ));
     }
     spans.push(Span::styled(task.text.clone(), text_style));
     spans.push(Span::raw(pad));
     spans.push(Span::styled(due_prefix, Style::default().fg(Color::Blue)));
-    spans.push(Span::styled(before.to_string(), Style::default().fg(Color::White)));
+    spans.push(Span::styled(
+        before.to_string(),
+        Style::default().fg(Color::White),
+    ));
     spans.push(Span::styled(
         "|",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::SLOW_BLINK),
     ));
-    spans.push(Span::styled(after.to_string(), Style::default().fg(Color::White)));
+    spans.push(Span::styled(
+        after.to_string(),
+        Style::default().fg(Color::White),
+    ));
     ListItem::new(Line::from(spans))
 }
 

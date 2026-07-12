@@ -11,12 +11,8 @@ mod help;
 mod left;
 mod right;
 
-pub(crate) fn split_at_char(s: &str, char_idx: usize) -> (&str, &str) {
-    let byte = s
-        .char_indices()
-        .nth(char_idx)
-        .map(|(b, _)| b)
-        .unwrap_or(s.len());
+pub fn split_at_char(s: &str, char_idx: usize) -> (&str, &str) {
+    let byte = s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b);
     (&s[..byte], &s[byte..])
 }
 
@@ -32,6 +28,6 @@ pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &mut AppState) {
     draw_right(f, todo_list, app, panels[1]);
 
     if matches!(app.mode, Mode::Help) {
-        draw_help_overlay(f, area);
+        draw_help_overlay(f, app, area);
     }
 }

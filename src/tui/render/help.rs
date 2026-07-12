@@ -1,3 +1,4 @@
+use crate::tui::state::AppState;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -6,8 +7,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
-    let popup = centered_rect(65, 46, area);
+pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
+    let popup = centered_rect(55, 30, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -98,10 +99,18 @@ pub fn draw_help_overlay(f: &mut Frame, area: Rect) {
         Line::from("    tomorrow  /  tmr  /  tmw  /  tom  - Tomorrow"),
         Line::from("    next week  /  nextweek  /  nw     - 7 days from today"),
         Line::from(""),
-        Line::from("  Press Esc, q, or ? to close this help window"),
+        Line::from("  Use Up/Down (j/k) to scroll. Press Esc, q, or ? to close"),
     ];
 
-    let para = Paragraph::new(content).block(block);
+    let content_len = content.len();
+    let visible_height = popup.height.saturating_sub(2) as usize;
+    let max_scroll = content_len.saturating_sub(visible_height);
+    let max_scroll_u16 = u16::try_from(max_scroll).unwrap_or(u16::MAX);
+    app.help_scroll = app.help_scroll.min(max_scroll_u16);
+
+    let para = Paragraph::new(content)
+        .block(block)
+        .scroll((app.help_scroll, 0));
     f.render_widget(para, popup);
 }
 

@@ -83,7 +83,7 @@ fn ensure_todo_file_exists(path: &Path) -> Result<()> {
 
 fn print_help() {
     println!(
-        r#"grc - A terminal-based todo manager backed by a plain Markdown file.
+        "grc - A terminal-based todo manager backed by a plain Markdown file.
 
 USAGE:
     grc [FLAGS] [PATH]
@@ -100,7 +100,7 @@ ENVIRONMENT VARIABLES:
 EXAMPLES:
     grc                         Open default file (~/.todo.md)
     grc /path/to/todo.md        Open a specific todo file
-    GRC_TODO_PATH=todo.md grc   Open file via environment variable"#
+    GRC_TODO_PATH=todo.md grc   Open file via environment variable"
     );
 }
 

@@ -1,4 +1,4 @@
-use crate::task::{get_node_mut, Section, Task, TodoList};
+use crate::task::{Section, Task, TodoList, get_node_mut};
 use anyhow::Result;
 use chrono::NaiveDate;
 use std::fs::File;
@@ -25,10 +25,6 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
     let reader = BufReader::new(file);
     let mut todo_list = TodoList::default();
 
-    // `stack` holds the currently open headings as `(level, path)` pairs, where
-    // `path` is the index path of that heading. The parent of a new heading is
-    // the top of the stack after popping every entry whose level is >= the new
-    // heading's level (so siblings at the same level don't nest).
     let mut stack: Vec<(usize, Vec<usize>)> = Vec::new();
 
     for line in reader.lines() {
@@ -45,14 +41,11 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
             let level = hashes;
             let name = trimmed[hashes + 1..].trim().to_string();
 
-            while stack.last().map_or(false, |(lvl, _)| *lvl >= level) {
+            while stack.last().is_some_and(|(lvl, _)| *lvl >= level) {
                 stack.pop();
             }
 
-            let parent_path: Vec<usize> = stack
-                .last()
-                .map(|(_, p)| p.clone())
-                .unwrap_or_default();
+            let parent_path: Vec<usize> = stack.last().map_or_else(Vec::new, |(_, p)| p.clone());
 
             let new_section = Section::new(name);
             if parent_path.is_empty() {
@@ -68,11 +61,11 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
             continue;
         }
 
-        if trimmed.starts_with("- [ ]")
+        if trimmed.starts_with("- [ ")
             || trimmed.starts_with("- [x]")
             || trimmed.starts_with("- [X]")
         {
-            let is_done = trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]");
+            let is_done = matches!(trimmed.as_bytes()[3], b'x' | b'X');
             let mut task_text = trimmed[5..].trim().to_string();
 
             let mut due = None;
@@ -81,7 +74,7 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
                 if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
                     due = Some(parsed_date);
                     task_text = task_text
-                        .replace(&format!("due:{}", date_str), "")
+                        .replace(&format!("due:{date_str}"), "")
                         .trim()
                         .to_string();
                 }
@@ -93,10 +86,10 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
                 due,
             };
 
-            if let Some((_, path)) = stack.last() {
-                if let Some(sec) = get_node_mut(&mut todo_list, path) {
-                    sec.tasks.push(task);
-                }
+            if let Some((_, path)) = stack.last()
+                && let Some(sec) = get_node_mut(&mut todo_list, path)
+            {
+                sec.tasks.push(task);
             }
         }
     }
@@ -125,17 +118,18 @@ fn write_section(
     if !*first && *last_wrote_tasks {
         writeln!(file)?;
     }
-    writeln!(file, "{} {}", "#".repeat(level), sec.name)?;
+    let hashes = "#".repeat(level);
+    writeln!(file, "{hashes} {}", sec.name)?;
     *first = false;
 
-    if !sec.tasks.is_empty() {
+    if sec.tasks.is_empty() {
+        *last_wrote_tasks = false;
+    } else {
         writeln!(file)?;
         for task in &sec.tasks {
             write_task_line(file, task)?;
         }
         *last_wrote_tasks = true;
-    } else {
-        *last_wrote_tasks = false;
     }
 
     for child in &sec.children {
@@ -147,15 +141,10 @@ fn write_section(
 fn write_task_line(file: &mut File, task: &Task) -> Result<()> {
     let box_str = if task.is_done { "[x]" } else { "[ ]" };
     if let Some(date) = task.due {
-        writeln!(
-            file,
-            "- {} {} due:{}",
-            box_str,
-            task.text,
-            date.format("%Y-%m-%d")
-        )?;
+        let formatted = date.format("%Y-%m-%d");
+        writeln!(file, "- {box_str} {} due:{formatted}", task.text)?;
     } else {
-        writeln!(file, "- {} {}", box_str, task.text)?;
+        writeln!(file, "- {box_str} {}", task.text)?;
     }
     Ok(())
 }
@@ -379,10 +368,7 @@ mod tests {
         assert_eq!(parsed.sections[0].children.len(), 1);
         assert_eq!(parsed.sections[0].children[0].name, "sub1");
         assert_eq!(parsed.sections[0].children[0].tasks.len(), 1);
-        assert_eq!(
-            parsed.sections[0].children[0].children[0].name,
-            "subsub"
-        );
+        assert_eq!(parsed.sections[0].children[0].children[0].name, "subsub");
         assert_eq!(
             parsed.sections[0].children[0].children[0].tasks[0].text,
             "Deep task"

@@ -29,32 +29,21 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         ))
         .border_style(Style::default().fg(border_color));
 
-    let renaming_node = if let Mode::InputSection { node: Some(n), .. } = &app.mode {
-        Some(n.clone())
-    } else {
-        None
-    };
-    let rename_buf = if let Mode::InputSection { buf, .. } = &app.mode {
-        Some(buf.clone())
-    } else {
-        None
-    };
-    let rename_cursor = if let Mode::InputSection { cursor, .. } = &app.mode {
-        *cursor
-    } else {
-        0
+    let (renaming_node, rename_buf, rename_cursor) = match &app.mode {
+        Mode::InputSection {
+            node, buf, cursor, ..
+        } => (node.as_ref(), Some(buf.as_str()), *cursor),
+        _ => (None, None, 0),
     };
 
-    let ghost = if let Mode::InputSection {
-        node: None,
-        buf,
-        cursor,
-        ..
-    } = &app.mode
-    {
-        Some((buf.clone(), *cursor))
-    } else {
-        None
+    let ghost = match &app.mode {
+        Mode::InputSection {
+            node: None,
+            buf,
+            cursor,
+            ..
+        } => Some((buf.as_str(), *cursor)),
+        _ => None,
     };
 
     let items: Vec<ListItem> = app
@@ -62,28 +51,25 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         .iter()
         .map(|item| match item {
             TreeItem::Ghost(depth) => {
-                let (buf, cursor) = ghost.clone().unwrap_or_default();
-                let (before, after) = crate::tui::render::split_at_char(&buf, cursor);
+                let (buf, cursor) = ghost.unwrap_or(("", 0));
+                let (before, after) = crate::tui::render::split_at_char(buf, cursor);
                 ListItem::new(Line::from(vec![
-                    Span::styled(
-                        indent(*depth),
-                        Style::default().fg(Color::Green),
-                    ),
-                    Span::styled(before.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(indent(*depth), Style::default().fg(Color::Green)),
+                    Span::styled(before, Style::default().fg(Color::White)),
                     Span::styled(
                         "|",
                         Style::default()
                             .fg(Color::Green)
                             .add_modifier(Modifier::SLOW_BLINK),
                     ),
-                    Span::styled(after.to_string(), Style::default().fg(Color::White)),
+                    Span::styled(after, Style::default().fg(Color::White)),
                 ]))
             }
             TreeItem::Node(path) => {
                 let depth = path.len().saturating_sub(1);
-                if Some(path) == renaming_node.as_ref() {
+                if Some(path) == renaming_node {
                     let (before, after) =
-                        crate::tui::render::split_at_char(rename_buf.as_deref().unwrap_or(""), rename_cursor);
+                        crate::tui::render::split_at_char(rename_buf.unwrap_or(""), rename_cursor);
                     ListItem::new(Line::from(vec![
                         Span::styled(indent(depth), Style::default().fg(Color::Cyan)),
                         Span::styled(before, Style::default().fg(Color::White)),
@@ -103,7 +89,7 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
                         (Color::Blue, Modifier::empty())
                     };
                     ListItem::new(Line::from(vec![Span::styled(
-                        format!("{}{} ({})", indent(depth), sec.name, n),
+                        format!("{}{} ({n})", indent(depth), sec.name),
                         Style::default().fg(fg).add_modifier(modifier),
                     )]))
                 } else {
@@ -132,7 +118,6 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
     f.render_stateful_widget(list, area, &mut app.left_state);
 }
 
-/// Two spaces of indentation per nesting level.
 fn indent(depth: usize) -> String {
     "  ".repeat(depth)
 }

@@ -1,50 +1,40 @@
 use chrono::NaiveDate;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Task {
     pub text: String,
     pub is_done: bool,
     pub due: Option<NaiveDate>,
 }
 
-/// A heading in the markdown file. Headings can be nested arbitrarily deep:
-/// each section owns its direct tasks and a list of child sections.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Section {
     pub name: String,
     pub tasks: Vec<Task>,
-    pub children: Vec<Section>,
+    pub children: Vec<Self>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TodoList {
     pub sections: Vec<Section>,
 }
 
 impl Section {
     pub fn new(name: impl Into<String>) -> Self {
-        Section {
+        Self {
             name: name.into(),
             tasks: Vec::new(),
             children: Vec::new(),
         }
     }
 
-    /// Total number of tasks in this section and all of its descendants.
     pub fn count_tasks(&self) -> usize {
-        let mut n = self.tasks.len();
-        for child in &self.children {
-            n += child.count_tasks();
-        }
-        n
+        self.tasks.len() + self.children.iter().map(Self::count_tasks).sum::<usize>()
     }
 }
 
-/// A path of child indices identifying a section in the tree, e.g. `[2, 0]`
-/// means the first child of the third top-level section.
 pub type NodePath = Vec<usize>;
 
-/// Immutably borrow the section located at `path`.
 pub fn get_node<'a>(list: &'a TodoList, path: &[usize]) -> Option<&'a Section> {
     get_node_slice(&list.sections, path)
 }
@@ -64,7 +54,6 @@ fn get_node_slice_impl<'a>(sec: &'a Section, rest: &[usize]) -> Option<&'a Secti
     get_node_slice_impl(sec.children.get(rest[0])?, &rest[1..])
 }
 
-/// Mutably borrow the section located at `path`.
 pub fn get_node_mut<'a>(list: &'a mut TodoList, path: &[usize]) -> Option<&'a mut Section> {
     if path.is_empty() {
         return None;
