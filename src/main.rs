@@ -1,17 +1,19 @@
+mod cli;
 mod parser;
 mod task;
 mod tui;
 
 use anyhow::{Context, Result, anyhow};
+use clap::Parser;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process;
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let todo_path = determine_todo_path(&args)
-        .context("Failed to determine the path for the todo Markdown file.")?;
+    let cli = cli::Cli::parse();
+    let todo_path = cli
+        .todo_path
+        .map_or_else(resolve_todo_path, Ok)?;
 
     ensure_todo_file_exists(&todo_path).context("Failed to initialize the todo storage file.")?;
 
@@ -19,19 +21,6 @@ fn main() -> Result<()> {
         .context("Site of Grace TUI encountered an unrecoverable runtime error.")?;
 
     Ok(())
-}
-
-fn determine_todo_path(args: &[String]) -> Result<PathBuf> {
-    if args.len() > 1 {
-        let first_arg = &args[1];
-        if first_arg == "-h" || first_arg == "--help" {
-            print_help();
-            process::exit(0);
-        }
-        Ok(PathBuf::from(first_arg))
-    } else {
-        resolve_todo_path()
-    }
 }
 
 fn resolve_todo_path() -> Result<PathBuf> {
@@ -81,32 +70,11 @@ fn ensure_todo_file_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn print_help() {
-    println!(
-        "grc - A terminal-based todo manager backed by a plain Markdown file.
-
-USAGE:
-    grc [FLAGS] [PATH]
-
-FLAGS:
-    -h, --help       Prints help information
-
-ARGS:
-    <PATH>           Path to a specific todo Markdown file [default: ~/.todo.md]
-
-ENVIRONMENT VARIABLES:
-    GRC_TODO_PATH    Override the default todo file path (alternative to passing PATH)
-
-EXAMPLES:
-    grc                         Open default file (~/.todo.md)
-    grc /path/to/todo.md        Open a specific todo file
-    GRC_TODO_PATH=todo.md grc   Open file via environment variable"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cli::Cli;
+    use clap::Parser;
     use std::env;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -124,17 +92,15 @@ mod tests {
     }
 
     #[test]
-    fn determine_todo_path_uses_first_arg() {
-        let args = vec!["grc".to_string(), "my_todo.md".to_string()];
-        let path = determine_todo_path(&args).unwrap();
-        assert_eq!(path, PathBuf::from("my_todo.md"));
+    fn cli_parses_path_argument() {
+        let cli = Cli::try_parse_from(["grc", "my_todo.md"]).unwrap();
+        assert_eq!(cli.todo_path, Some(PathBuf::from("my_todo.md")));
     }
 
     #[test]
-    fn determine_todo_path_falls_back_when_no_arg() {
-        let args = vec!["grc".to_string()];
-        let path = determine_todo_path(&args);
-        assert!(path.is_ok());
+    fn cli_no_path_argument() {
+        let cli = Cli::try_parse_from(["grc"]).unwrap();
+        assert!(cli.todo_path.is_none());
     }
 
     #[test]

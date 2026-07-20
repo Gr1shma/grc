@@ -1,6 +1,6 @@
 use crate::task::{Section, Task, TodoList, get_node_mut};
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate, Weekday};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -16,7 +16,24 @@ pub fn resolve_relative_date(input: &str) -> Option<NaiveDate> {
         "today" | "tod" | "t" => Some(today),
         "tomorrow" | "tmr" | "tmw" | "tom" => Some(today + chrono::Duration::days(1)),
         "next week" | "nw" | "nextweek" => Some(today + chrono::Duration::days(7)),
+        "sun" | "sunday" => Some(next_weekday(today, Weekday::Sun)),
+        "mon" | "monday" => Some(next_weekday(today, Weekday::Mon)),
+        "tue" | "tuesday" => Some(next_weekday(today, Weekday::Tue)),
+        "wed" | "wednesday" => Some(next_weekday(today, Weekday::Wed)),
+        "thu" | "thursday" => Some(next_weekday(today, Weekday::Thu)),
+        "fri" | "friday" => Some(next_weekday(today, Weekday::Fri)),
+        "sat" | "saturday" => Some(next_weekday(today, Weekday::Sat)),
         _ => NaiveDate::parse_from_str(&cleaned, "%Y-%m-%d").ok(),
+    }
+}
+
+fn next_weekday(from: NaiveDate, target: Weekday) -> NaiveDate {
+    let current = from.weekday();
+    let diff = (target.num_days_from_monday() + 7 - current.num_days_from_monday()) % 7;
+    if diff == 0 {
+        from + chrono::Duration::days(7)
+    } else {
+        from + chrono::Duration::days(diff as i64)
     }
 }
 
@@ -571,5 +588,63 @@ mod tests {
         );
         assert_eq!(resolve_relative_date("invalid-date"), None);
         assert_eq!(resolve_relative_date(""), None);
+    }
+
+    #[test]
+    fn test_resolve_weekday_shortcuts() {
+        let today = chrono::Local::now().date_naive();
+
+        // Abbreviated forms should work
+        let result = resolve_relative_date("mon").unwrap();
+        assert!(result > today, "weekday shortcut must be in the future");
+
+        // Full names should also work
+        let result = resolve_relative_date("Monday").unwrap();
+        assert!(result > today);
+
+        // All weekday abbreviations should resolve to a future date
+        for day in &["sun", "mon", "tue", "wed", "thu", "fri", "sat"] {
+            let result = resolve_relative_date(day).unwrap();
+            assert!(
+                result > today,
+                "{day} should resolve to a future date, got {result}"
+            );
+        }
+
+        // Full names too
+        for day in &["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        {
+            let result = resolve_relative_date(day).unwrap();
+            assert!(
+                result > today,
+                "{day} should resolve to a future date, got {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_next_weekday_logic() {
+        use chrono::Weekday;
+
+        // Monday 2025-07-21
+        let monday = NaiveDate::from_ymd_opt(2025, 7, 21).unwrap();
+
+        // Next Tuesday from Monday = +1 day
+        assert_eq!(
+            next_weekday(monday, Weekday::Tue),
+            NaiveDate::from_ymd_opt(2025, 7, 22).unwrap()
+        );
+
+        // Next Monday from Monday = +7 days (next week)
+        assert_eq!(
+            next_weekday(monday, Weekday::Mon),
+            NaiveDate::from_ymd_opt(2025, 7, 28).unwrap()
+        );
+
+        // Next Sunday from Monday = +6 days
+        assert_eq!(
+            next_weekday(monday, Weekday::Sun),
+            NaiveDate::from_ymd_opt(2025, 7, 27).unwrap()
+        );
     }
 }
