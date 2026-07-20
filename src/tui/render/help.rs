@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
-    let popup = centered_rect(55, 30, area);
+    let popup = centered_rect(55, 34, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()
@@ -74,6 +74,7 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
         Line::from("    yy / p       - Yank / paste item below (after current)"),
         Line::from("    P            - Paste item above (one step up, like Shift+O)"),
         Line::from("    dd           - Delete selected task"),
+        Line::from("    :            - Sort tasks by due date"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "  While Typing (any input mode):",
@@ -90,7 +91,7 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
         Line::from("    Esc          - Cancel input"),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "  Due Date Formats (used with t):",
+            "  Due Date Formats (used with t or inline):",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
@@ -99,6 +100,9 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
         Line::from("    today  /  tod  /  t     - Today"),
         Line::from("    tomorrow  /  tmr  /  tmw  /  tom  - Tomorrow"),
         Line::from("    next week  /  nextweek  /  nw     - 7 days from today"),
+        Line::from("    sun  /  mon  /  tue  /  wed  /  thu  /  fri  /  sat"),
+        Line::from("    sunday / monday / ...             - Next occurrence of weekday"),
+        Line::from("    Type due:DATE inline in task text (e.g. Buy milk due:tue)"),
         Line::from(""),
         Line::from("  Use Up/Down (j/k) to scroll. Press Esc, q, or ? to close"),
     ];

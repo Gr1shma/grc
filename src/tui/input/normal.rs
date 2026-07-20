@@ -21,6 +21,11 @@ pub fn handle_normal(
         return Ok(false);
     }
 
+    if code == KeyCode::Char(':') && app.focus == Focus::Right {
+        sort_tasks_by_due(app, todo_list, path)?;
+        return Ok(false);
+    }
+
     if code == KeyCode::Char('/') {
         app.mode = Mode::Filter;
         return Ok(false);
@@ -527,6 +532,27 @@ fn child_or_self_task_count(todo_list: &TodoList, node: &NodePath) -> usize {
     crate::task::get_node(todo_list, node).map_or(0, |s| s.tasks.len())
 }
 
+fn sort_tasks_by_due(
+    app: &mut AppState,
+    todo_list: &mut TodoList,
+    path: &Path,
+) -> Result<()> {
+    if let Some(node) = selected_node(app) {
+        if let Some(sec) = crate::task::get_node_mut(todo_list, &node) {
+            sec.tasks.sort_by(|a, b| {
+                match (a.due, b.due) {
+                    (Some(da), Some(db)) => da.cmp(&db),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+            });
+            write_file(path, todo_list)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +770,26 @@ mod tests {
             }
             other => panic!("expected InputSection, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_colon_sorts_tasks_by_due_date() {
+        let content = "# main\n- [ ] C task due:2025-12-01\n- [ ] A task due:2025-01-15\n- [ ] B task\n";
+        let (f, mut app, mut list) = setup(content);
+        app.focus = Focus::Right;
+        app.left_state.select(Some(0));
+        app.right_state.select(Some(0));
+
+        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char(':')).unwrap();
+
+        let parsed = parse_file(f.path()).unwrap();
+        assert_eq!(parsed.sections[0].tasks[0].text, "A task");
+        assert_eq!(
+            parsed.sections[0].tasks[0].due,
+            Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap())
+        );
+        assert_eq!(parsed.sections[0].tasks[1].text, "C task");
+        assert_eq!(parsed.sections[0].tasks[2].text, "B task");
+        assert!(parsed.sections[0].tasks[2].due.is_none());
     }
 }

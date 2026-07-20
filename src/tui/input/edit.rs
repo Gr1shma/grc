@@ -135,10 +135,14 @@ fn commit_input_task(
         ..
     } = params;
 
-    let text = buf.trim().to_string();
-    if !text.is_empty()
-        && let Some(node) = selected_node(app)
-    {
+    let raw = buf.trim().to_string();
+    if raw.is_empty() {
+        return Ok(());
+    }
+
+    let (text, due) = extract_inline_due(&raw);
+
+    if let Some(node) = selected_node(app) {
         match editing_idx {
             None => {
                 let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
@@ -163,7 +167,7 @@ fn commit_input_task(
                         Task {
                             text,
                             is_done: false,
-                            due: None,
+                            due,
                         },
                     );
                 }
@@ -187,6 +191,9 @@ fn commit_input_task(
                 if let Some(ref_item) = refs.get(*idx) {
                     if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
                         task.text = text;
+                        if due.is_some() {
+                            task.due = due;
+                        }
                     }
                     write_file(path, todo_list)?;
                 }
@@ -194,6 +201,30 @@ fn commit_input_task(
         }
     }
     Ok(())
+}
+
+/// Extract an inline `due:DATE` token from task text.
+/// Returns (cleaned_text, parsed_date).
+fn extract_inline_due(text: &str) -> (String, Option<chrono::NaiveDate>) {
+    if let Some(idx) = text
+        .find("due:")
+        .filter(|&i| i == 0 || text.as_bytes()[i - 1] == b' ')
+    {
+        let date_str = text[idx + 4..].split_whitespace().next().unwrap_or("");
+        let parsed = resolve_relative_date(date_str);
+        if parsed.is_some() || !date_str.is_empty() {
+            let due_token_len = 4 + date_str.len();
+            let cleaned = format!(
+                "{}{}",
+                text[..idx].trim_end(),
+                text[idx + due_token_len..].trim_start()
+            )
+            .trim()
+            .to_string();
+            return (cleaned, parsed);
+        }
+    }
+    (text.to_string(), None)
 }
 
 pub struct InputDueParams {
@@ -859,5 +890,62 @@ mod tests {
         handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 1);
+    }
+
+    #[test]
+    fn extract_inline_due_parses_due_token() {
+        let (text, due) = extract_inline_due("Buy milk due:2025-06-15");
+        assert_eq!(text, "Buy milk");
+        assert_eq!(due, Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()));
+    }
+
+    #[test]
+    fn extract_inline_due_parses_weekday() {
+        let (text, due) = extract_inline_due("Submit report due:tue");
+        assert_eq!(text, "Submit report");
+        assert!(due.is_some());
+    }
+
+    #[test]
+    fn extract_inline_due_no_due_token() {
+        let (text, due) = extract_inline_due("Just a task");
+        assert_eq!(text, "Just a task");
+        assert!(due.is_none());
+    }
+
+    #[test]
+    fn extract_inline_due_empty_string() {
+        let (text, due) = extract_inline_due("");
+        assert_eq!(text, "");
+        assert!(due.is_none());
+    }
+
+    #[test]
+    fn extract_inline_due_due_at_start() {
+        let (text, due) = extract_inline_due("due:tomorrow buy milk");
+        assert_eq!(text, "buy milk");
+        assert!(due.is_some());
+    }
+
+    #[test]
+    fn input_task_enter_with_inline_due() {
+        let (f, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+        let mut params = InputTaskParams {
+            editing_idx: None,
+            insert_idx: Some(1),
+            above: false,
+            buf: "New task due:2025-06-15".to_string(),
+            cursor: 23,
+        };
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
+        let parsed = parse_file(f.path()).unwrap();
+        assert_eq!(parsed.sections[0].tasks.len(), 2);
+        assert_eq!(parsed.sections[0].tasks[1].text, "New task");
+        assert_eq!(
+            parsed.sections[0].tasks[1].due,
+            Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap())
+        );
     }
 }
