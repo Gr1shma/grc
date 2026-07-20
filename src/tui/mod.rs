@@ -24,12 +24,38 @@ pub fn run_tui(path: &Path) -> Result<()> {
     let backend = CrosstermBackend::new(out);
     let mut term = Terminal::new(backend).context("create terminal")?;
 
-    let result = run_engine(&mut term, path);
+    // Guard struct ensures terminal cleanup even on panic
+    struct TerminalGuard<'a> {
+        term: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
+    }
+    impl<'a> Drop for TerminalGuard<'a> {
+        fn drop(&mut self) {
+            let _ = disable_raw_mode();
+            let _ = execute!(self.term.backend_mut(), LeaveAlternateScreen);
+            let _ = self.term.show_cursor();
+        }
+    }
 
-    disable_raw_mode().context("disable raw mode")?;
-    execute!(term.backend_mut(), LeaveAlternateScreen).context("leave alternate screen")?;
-    term.show_cursor().context("restore cursor")?;
-    result
+    let guard = TerminalGuard { term: &mut term };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_engine(guard.term, path)
+    }));
+
+    drop(guard); // Cleanup runs here
+
+    match result {
+        Ok(inner_result) => inner_result,
+        Err(panic) => {
+            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic".to_string()
+            };
+            Err(anyhow::anyhow!("TUI panicked: {}", msg))
+        }
+    }
 }
 
 fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) -> Result<()> {
@@ -37,7 +63,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
     let mut app = AppState::new(todo_list.sections.len());
 
     loop {
-        app.tree_items = build_tree_items(&todo_list, &app.mode);
+        app.tree_items = build_visible_tree_items(&todo_list, &app.mode, &app.filter_lower);
         sync_selection_states(&mut app, &todo_list);
         term.draw(|f| render::draw_ui(f, &todo_list, &mut app))?;
 
@@ -48,7 +74,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                 break;
             }
 
-            let quit = match app.mode.clone() {
+            let quit = match &app.mode {
                 Mode::Normal => input::handle_normal(&mut app, &mut todo_list, path, key.code)?,
                 Mode::Help => {
                     if key.code == event::KeyCode::Esc
@@ -56,6 +82,10 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         || key.code == event::KeyCode::Char('?')
                     {
                         app.mode = Mode::Normal;
+                    } else if key.code == event::KeyCode::Char('/') {
+                        app.mode = Mode::Filter;
+                        app.left_state.select(Some(0));
+                        app.right_state.select(Some(0));
                     } else if key.code == event::KeyCode::Down || key.code == event::KeyCode::Char('j') {
                         app.help_scroll = app.help_scroll.saturating_add(1);
                     } else if key.code == event::KeyCode::Up || key.code == event::KeyCode::Char('k') {
@@ -71,17 +101,18 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     cursor,
                 } => {
                     let mut params = InputTaskParams {
-                        editing_idx,
-                        insert_idx,
-                        above,
-                        buf,
-                        cursor,
+                        editing_idx: *editing_idx,
+                        insert_idx: *insert_idx,
+                        above: *above,
+                        buf: buf.clone(),
+                        cursor: *cursor,
                     };
                     input::handle_input_task(
                         &mut app,
                         &mut todo_list,
                         path,
                         key.code,
+                        key.modifiers,
                         &mut params,
                     )?;
                     false
@@ -92,11 +123,11 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     cursor,
                 } => {
                     let mut params = InputDueParams {
-                        task_idx,
-                        buf,
-                        cursor,
+                        task_idx: *task_idx,
+                        buf: buf.clone(),
+                        cursor: *cursor,
                     };
-                    input::handle_input_due(&mut app, &mut todo_list, path, key.code, &mut params)?;
+                    input::handle_input_due(&mut app, &mut todo_list, path, key.code, key.modifiers, &mut params)?;
                     false
                 }
                 Mode::InputSection {
@@ -107,19 +138,24 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                     cursor,
                 } => {
                     let mut params = InputSectionParams {
-                        node,
-                        parent,
-                        insert_idx,
-                        buf,
-                        cursor,
+                        node: node.clone(),
+                        parent: parent.clone(),
+                        insert_idx: *insert_idx,
+                        buf: buf.clone(),
+                        cursor: *cursor,
                     };
                     input::handle_input_section(
                         &mut app,
                         &mut todo_list,
                         path,
                         key.code,
+                        key.modifiers,
                         &mut params,
                     )?;
+                    false
+                }
+                Mode::Filter => {
+                    input::handle_filter(&mut app, key.code)?;
                     false
                 }
             };
@@ -149,7 +185,7 @@ fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
             ..
         } => {
             if let Some(node) = selected_node(app) {
-                let task_refs = get_task_refs(todo_list, &node);
+                let task_refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 let pos = insert_idx.unwrap_or(task_refs.len()).min(task_refs.len());
                 app.right_state.select(Some(pos));
             }
@@ -172,6 +208,113 @@ pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
     let mut items = Vec::new();
     walk_tree(&mut items, ghost.as_ref(), None, &todo_list.sections, 0);
     items
+}
+
+pub fn build_visible_tree_items(
+    todo_list: &TodoList,
+    mode: &Mode,
+    filter_lower: &str,
+) -> Vec<TreeItem> {
+    if filter_lower.is_empty() || matches!(mode, Mode::InputSection { .. }) {
+        return build_tree_items(todo_list, mode);
+    }
+    // Two-pass filter: prioritize section name matches, fall back to task matches
+    let mut name_matched_paths: Vec<NodePath> = Vec::new();
+    collect_section_name_matches(&mut name_matched_paths, None, &todo_list.sections, filter_lower);
+
+    let mut items = Vec::new();
+    if !name_matched_paths.is_empty() {
+        // Some section names matched - show only those sections and their ancestors
+        for path in &name_matched_paths {
+            // Add all ancestors
+            for depth in 0..path.len() {
+                let ancestor_path = path[..=depth].to_vec();
+                if !items.iter().any(|item| matches!(item, TreeItem::Node(p) if *p == ancestor_path)) {
+                    items.push(TreeItem::Node(ancestor_path));
+                }
+            }
+        }
+    } else {
+        // No section names matched - fall back to task-based filtering
+        walk_tree_filtered_by_task(&mut items, None, &todo_list.sections, filter_lower);
+    }
+    items
+}
+
+/// Collect paths of sections whose name matches the filter
+fn collect_section_name_matches(
+    paths: &mut Vec<NodePath>,
+    parent: Option<&NodePath>,
+    children: &[Section],
+    filter_lower: &str,
+) {
+    for (i, child) in children.iter().enumerate() {
+        let mut p = parent.map_or_else(Vec::new, Clone::clone);
+        p.push(i);
+        if section_matches(child, filter_lower) {
+            paths.push(p.clone());
+        }
+        collect_section_name_matches(paths, Some(&p), &child.children, filter_lower);
+    }
+}
+
+/// Fallback: show sections that contain matching tasks
+fn walk_tree_filtered_by_task(
+    items: &mut Vec<TreeItem>,
+    parent: Option<&NodePath>,
+    children: &[Section],
+    filter_lower: &str,
+) {
+    for (i, child) in children.iter().enumerate() {
+        let mut p = parent.map_or_else(Vec::new, Clone::clone);
+        p.push(i);
+        let desc_match = subtree_has_matching_task(child, filter_lower);
+        if desc_match {
+            items.push(TreeItem::Node(p.clone()));
+            walk_tree_filtered_by_task(items, Some(&p), &child.children, filter_lower);
+        }
+    }
+}
+
+fn subtree_has_matching_task(sec: &Section, filter_lower: &str) -> bool {
+    if sec.tasks.iter().any(|t| task_matches(t, filter_lower)) {
+        return true;
+    }
+    sec.children.iter().any(|c| subtree_has_matching_task(c, filter_lower))
+}
+
+fn section_matches(sec: &Section, filter_lower: &str) -> bool {
+    sec.name.to_lowercase().contains(filter_lower)
+}
+
+fn task_matches(task: &Task, filter_lower: &str) -> bool {
+    if task.text.to_lowercase().contains(filter_lower) {
+        return true;
+    }
+    task.due.is_some_and(|d| {
+        d.format("%Y-%m-%d").to_string().to_lowercase().contains(filter_lower)
+    })
+}
+
+pub fn get_task_refs_filtered(
+    todo_list: &TodoList,
+    node: &NodePath,
+    filter_lower: &str,
+) -> Vec<TaskRef> {
+    let refs = get_task_refs(todo_list, node);
+    if filter_lower.is_empty() {
+        return refs;
+    }
+    refs.into_iter()
+        .filter(|r| {
+            get_task_from_ref(todo_list, r)
+                .map(|task| task_matches(task, filter_lower))
+                .unwrap_or(false)
+                || r.sub_name
+                    .as_deref()
+                    .is_some_and(|s| s.to_lowercase().contains(filter_lower))
+        })
+        .collect()
 }
 
 fn walk_tree(
@@ -290,16 +433,14 @@ fn node_breadcrumb(todo_list: &TodoList, node: &NodePath) -> Option<String> {
     }
 }
 
-pub fn get_task_from_ref<'a>(todo_list: &'a TodoList, ref_item: &TaskRef) -> &'a Task {
-    &get_node(todo_list, &ref_item.node)
-        .expect("task ref node must exist")
-        .tasks[ref_item.task_idx]
+pub fn get_task_from_ref<'a>(todo_list: &'a TodoList, ref_item: &TaskRef) -> Option<&'a Task> {
+    let sec = get_node(todo_list, &ref_item.node)?;
+    sec.tasks.get(ref_item.task_idx)
 }
 
-pub fn get_task_from_ref_mut<'a>(todo_list: &'a mut TodoList, ref_item: &TaskRef) -> &'a mut Task {
-    &mut get_node_mut(todo_list, &ref_item.node)
-        .expect("task ref node must exist")
-        .tasks[ref_item.task_idx]
+pub fn get_task_from_ref_mut<'a>(todo_list: &'a mut TodoList, ref_item: &TaskRef) -> Option<&'a mut Task> {
+    let sec = get_node_mut(todo_list, &ref_item.node)?;
+    sec.tasks.get_mut(ref_item.task_idx)
 }
 
 pub fn insert_section(
@@ -307,20 +448,21 @@ pub fn insert_section(
     parent: Option<&NodePath>,
     idx: usize,
     section: Section,
-) -> NodePath {
+) -> Result<NodePath> {
     match parent {
         None => {
             let i = idx.min(todo_list.sections.len());
             todo_list.sections.insert(i, section);
-            vec![i]
+            Ok(vec![i])
         }
         Some(p) => {
-            let sec = get_node_mut(todo_list, p).expect("parent must exist");
+            let sec = get_node_mut(todo_list, p)
+                .ok_or_else(|| anyhow::anyhow!("Parent section not found for path {:?}", p))?;
             let i = idx.min(sec.children.len());
             sec.children.insert(i, section);
             let mut path = p.clone();
             path.push(i);
-            path
+            Ok(path)
         }
     }
 }
@@ -459,6 +601,53 @@ mod tests {
     }
 
     #[test]
+    fn build_visible_tree_items_empty_filter_keeps_all() {
+        let list = sample_todo_list();
+        let items = build_visible_tree_items(&list, &Mode::Normal, "");
+        assert_eq!(items.len(), 4);
+    }
+
+    #[test]
+    fn build_visible_tree_items_filters_sections_case_insensitive() {
+        let list = sample_todo_list();
+        // Filter is pre-lowercased by AppState, so pass lowercase here
+        let items = build_visible_tree_items(&list, &Mode::Normal, "personal");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], TreeItem::Node(vec![1]));
+    }
+
+    #[test]
+    fn build_visible_tree_items_includes_matching_parent_of_nested_task() {
+        let list = sample_todo_list();
+        // "endpoint" only appears in the nested "api" task; its ancestors must stay visible.
+        let items = build_visible_tree_items(&list, &Mode::Normal, "endpoint");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], TreeItem::Node(vec![0]));
+        assert_eq!(items[1], TreeItem::Node(vec![0, 0]));
+        assert_eq!(items[2], TreeItem::Node(vec![0, 0, 0]));
+    }
+
+    #[test]
+    fn get_task_refs_filtered_narrows_by_text() {
+        let list = sample_todo_list();
+        let refs = get_task_refs_filtered(&list, &vec![0], "backend");
+        // Matches the "backend" subsection task directly and the nested "api" task via its
+        // breadcrumb (sub_name "backend › api").
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].node, vec![0, 0]);
+        assert_eq!(refs[0].task_idx, 0);
+        assert_eq!(refs[1].node, vec![0, 0, 0]);
+        assert_eq!(refs[1].task_idx, 0);
+    }
+
+    #[test]
+    fn get_task_refs_filtered_empty_filter_returns_all() {
+        let list = sample_todo_list();
+        let refs = get_task_refs_filtered(&list, &vec![0], "");
+        assert_eq!(refs.len(), 4);
+    }
+
+    #[test]
     fn count_tasks_includes_all_descendants() {
         let list = sample_todo_list();
         assert_eq!(count_tasks(&list.sections[0]), 4);
@@ -524,7 +713,7 @@ mod tests {
             task_idx: 0,
             sub_name: Some("api".to_string()),
         };
-        let task = get_task_from_ref(&list, &r);
+        let task = get_task_from_ref(&list, &r).unwrap();
         assert_eq!(task.text, "Fix endpoint");
     }
 
@@ -536,7 +725,7 @@ mod tests {
             task_idx: 0,
             sub_name: None,
         };
-        let task = get_task_from_ref_mut(&mut list, &r);
+        let task = get_task_from_ref_mut(&mut list, &r).unwrap();
         task.is_done = true;
         task.text = "Modified".to_string();
         assert!(list.sections[0].tasks[0].is_done);
@@ -551,7 +740,7 @@ mod tests {
             task_idx: 0,
             sub_name: Some("api".to_string()),
         };
-        let task = get_task_from_ref_mut(&mut list, &r);
+        let task = get_task_from_ref_mut(&mut list, &r).unwrap();
         task.text = "Updated endpoint".to_string();
         assert_eq!(
             list.sections[0].children[0].children[0].tasks[0].text,
@@ -562,7 +751,7 @@ mod tests {
     #[test]
     fn insert_section_top_level() {
         let mut list = sample_todo_list();
-        let path = insert_section(&mut list, None, 1, Section::new("inserted"));
+        let path = insert_section(&mut list, None, 1, Section::new("inserted")).unwrap();
         assert_eq!(path, vec![1]);
         assert_eq!(list.sections.len(), 3);
         assert_eq!(list.sections[1].name, "inserted");
@@ -571,7 +760,7 @@ mod tests {
     #[test]
     fn insert_section_nested() {
         let mut list = sample_todo_list();
-        let path = insert_section(&mut list, Some(&vec![0]), 0, Section::new("child"));
+        let path = insert_section(&mut list, Some(&vec![0]), 0, Section::new("child")).unwrap();
         assert_eq!(path, vec![0, 0]);
         assert_eq!(list.sections[0].children[0].name, "child");
         assert_eq!(list.sections[0].children[1].name, "backend");

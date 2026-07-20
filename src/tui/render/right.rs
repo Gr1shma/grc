@@ -1,6 +1,6 @@
 use crate::task::{NodePath, Task, TodoList};
 use crate::tui::state::{AppState, Focus, Mode};
-use crate::tui::{get_task_from_ref, get_task_refs, selected_node};
+use crate::tui::{get_task_from_ref, get_task_refs_filtered, selected_node};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -35,7 +35,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         .border_style(Style::default().fg(border_color));
 
     let task_refs = selected_node(app)
-        .map(|node| get_task_refs(todo_list, &node))
+        .map(|node| get_task_refs_filtered(todo_list, &node, &app.filter_lower))
         .unwrap_or_default();
 
     let inner_w = area.width.saturating_sub(6) as usize;
@@ -134,7 +134,10 @@ fn build_task_list_items(
         .iter()
         .enumerate()
         .map(|(i, ref_item)| {
-            let task = get_task_from_ref(todo_list, ref_item);
+            let task = match get_task_from_ref(todo_list, ref_item) {
+                Some(t) => t,
+                None => return ListItem::new(Line::from("")),
+            };
             if Some(i) == editing_idx {
                 render_editing_row(
                     edit_buf.unwrap_or(""),

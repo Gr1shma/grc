@@ -19,10 +19,16 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         Color::DarkGray
     };
 
+    let title = if app.filter.is_empty() {
+        " Workspaces "
+    } else {
+        " Workspaces (filtered) "
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
-            " Workspaces ",
+            title,
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),

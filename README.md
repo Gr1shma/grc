@@ -35,6 +35,8 @@ Press `?` inside the app to open the full help overlay.
 
 | Key | Action |
 |-----|--------|
+| `/` | Filter (live search across sections and tasks) |
+| `Esc` | Clear active filter (when one is set) |
 | `j` / `k` | Move down / up |
 | `l` / `Enter` | Focus task panel |
 | `h` / `Esc` | Back to sections |

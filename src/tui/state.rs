@@ -23,6 +23,7 @@ pub enum ClipboardItem {
 pub enum Mode {
     Normal,
     Help,
+    Filter,
 
     InputTask {
         editing_idx: Option<usize>,
@@ -62,6 +63,8 @@ pub struct AppState {
 
     pub clipboard: Option<ClipboardItem>,
     pub help_scroll: u16,
+    pub filter: String,
+    pub filter_lower: String,
 }
 
 impl AppState {
@@ -83,6 +86,8 @@ impl AppState {
             pending_y: false,
             clipboard: None,
             help_scroll: 0,
+            filter: String::new(),
+            filter_lower: String::new(),
         }
     }
 }

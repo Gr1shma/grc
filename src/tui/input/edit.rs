@@ -2,8 +2,8 @@ use crate::parser::{resolve_relative_date, write_file};
 use crate::task::{NodePath, Section, Task, TodoList};
 use crate::tui::state::{AppState, Focus, Mode};
 use crate::tui::{
-    build_tree_items, get_task_from_ref_mut, get_task_refs, insert_section, rebuild_and_select,
-    selected_node,
+    build_tree_items, get_task_from_ref_mut, get_task_refs_filtered, insert_section,
+    rebuild_and_select, selected_node,
 };
 use anyhow::Result;
 use crossterm::event::KeyCode;
@@ -64,6 +64,7 @@ pub fn handle_input_task(
     todo_list: &mut TodoList,
     path: &Path,
     code: KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
     params: &mut InputTaskParams,
 ) -> Result<()> {
     match code {
@@ -73,9 +74,6 @@ pub fn handle_input_task(
         KeyCode::Enter => {
             commit_input_task(app, todo_list, path, params)?;
             app.mode = Mode::Normal;
-        }
-        KeyCode::Char(c) => {
-            insert_at_cursor(&mut params.buf, &mut params.cursor, c);
         }
         KeyCode::Backspace => {
             backspace_at_cursor(&mut params.buf, &mut params.cursor);
@@ -89,11 +87,24 @@ pub fn handle_input_task(
         KeyCode::Right => {
             move_right(&mut params.cursor, &params.buf);
         }
+        KeyCode::Home | KeyCode::Char('a')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            params.cursor = 0;
+        }
+        KeyCode::End | KeyCode::Char('e')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            params.cursor = params.buf.chars().count();
+        }
         KeyCode::Home => {
             params.cursor = 0;
         }
         KeyCode::End => {
             params.cursor = params.buf.chars().count();
+        }
+        KeyCode::Char(c) => {
+            insert_at_cursor(&mut params.buf, &mut params.cursor, c);
         }
         _ => {}
     }
@@ -130,7 +141,7 @@ fn commit_input_task(
     {
         match editing_idx {
             None => {
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
 
                 let anchor =
                     insert_idx.map_or(refs.len(), |p| if *above { p } else { p.saturating_sub(1) });
@@ -158,7 +169,7 @@ fn commit_input_task(
                 }
                 write_file(path, todo_list)?;
                 app.tree_items = build_tree_items(todo_list, &app.mode);
-                let new_refs = get_task_refs(todo_list, &node);
+                let new_refs = get_task_refs_filtered(todo_list, &node, &app.filter);
                 if let Some(pos) = new_refs
                     .iter()
                     .position(|r| r.node == target_node && r.task_idx == ins_idx)
@@ -172,10 +183,11 @@ fn commit_input_task(
                 app.focus = Focus::Right;
             }
             Some(idx) => {
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
                 if let Some(ref_item) = refs.get(*idx) {
-                    let task = get_task_from_ref_mut(todo_list, ref_item);
-                    task.text = text;
+                    if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
+                        task.text = text;
+                    }
                     write_file(path, todo_list)?;
                 }
             }
@@ -195,6 +207,7 @@ pub fn handle_input_due(
     todo_list: &mut TodoList,
     path: &Path,
     code: KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
     params: &mut InputDueParams,
 ) -> Result<()> {
     let InputDueParams {
@@ -209,22 +222,20 @@ pub fn handle_input_due(
         }
         KeyCode::Enter => {
             if let Some(node) = selected_node(app) {
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
                 if let Some(ref_item) = refs.get(*task_idx) {
-                    let task = get_task_from_ref_mut(todo_list, ref_item);
-                    let trimmed = buf.trim();
-                    task.due = if trimmed.is_empty() {
-                        None
-                    } else {
-                        resolve_relative_date(trimmed)
-                    };
+                    if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
+                        let trimmed = buf.trim();
+                        task.due = if trimmed.is_empty() {
+                            None
+                        } else {
+                            resolve_relative_date(trimmed)
+                        };
+                    }
                     write_file(path, todo_list)?;
                 }
             }
             app.mode = Mode::Normal;
-        }
-        KeyCode::Char(c) => {
-            insert_at_cursor(buf, cursor, c);
         }
         KeyCode::Backspace => {
             backspace_at_cursor(buf, cursor);
@@ -238,11 +249,24 @@ pub fn handle_input_due(
         KeyCode::Right => {
             move_right(cursor, buf);
         }
+        KeyCode::Home | KeyCode::Char('a')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            *cursor = 0;
+        }
+        KeyCode::End | KeyCode::Char('e')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            *cursor = buf.chars().count();
+        }
         KeyCode::Home => {
             *cursor = 0;
         }
         KeyCode::End => {
             *cursor = buf.chars().count();
+        }
+        KeyCode::Char(c) => {
+            insert_at_cursor(buf, cursor, c);
         }
         _ => {}
     }
@@ -270,6 +294,7 @@ pub fn handle_input_section(
     todo_list: &mut TodoList,
     path: &Path,
     code: KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
     params: &mut InputSectionParams,
 ) -> Result<()> {
     let InputSectionParams {
@@ -296,6 +321,16 @@ pub fn handle_input_section(
         KeyCode::Right => {
             move_right(cursor, buf);
         }
+        KeyCode::Home | KeyCode::Char('a')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            *cursor = 0;
+        }
+        KeyCode::End | KeyCode::Char('e')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            *cursor = buf.chars().count();
+        }
         KeyCode::Home => {
             *cursor = 0;
         }
@@ -307,16 +342,17 @@ pub fn handle_input_section(
             if !name.is_empty() {
                 match node {
                     None => {
-                        let new_path = insert_section(
+                        if let Ok(new_path) = insert_section(
                             todo_list,
                             parent.as_ref(),
                             insert_idx.unwrap_or(usize::MAX),
                             Section::new(name),
-                        );
-                        write_file(path, todo_list)?;
-                        app.mode = Mode::Normal;
-                        rebuild_and_select(app, todo_list, &new_path);
-                        app.right_state.select(Some(0));
+                        ) {
+                            let _ = write_file(path, todo_list);
+                            app.mode = Mode::Normal;
+                            rebuild_and_select(app, todo_list, &new_path);
+                            app.right_state.select(Some(0));
+                        }
                     }
                     Some(existing) => {
                         if let Some(sec) = crate::task::get_node_mut(todo_list, existing) {
@@ -358,7 +394,7 @@ mod tests {
     use crate::parser::parse_file;
     use crate::tui::state::{AppState, Mode};
     use chrono::NaiveDate;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -382,7 +418,7 @@ mod tests {
             buf: "typed".to_string(),
             cursor: 5,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Esc, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Esc, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -401,6 +437,7 @@ mod tests {
             &mut list,
             f.path(),
             KeyCode::Backspace,
+            KeyModifiers::NONE,
             &mut params,
         )
         .unwrap();
@@ -423,6 +460,7 @@ mod tests {
             &mut list,
             f.path(),
             KeyCode::Backspace,
+            KeyModifiers::NONE,
             &mut params,
         )
         .unwrap();
@@ -440,12 +478,13 @@ mod tests {
             buf: "ac".to_string(),
             cursor: 2,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Left, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Left, KeyModifiers::NONE, &mut params).unwrap();
         handle_input_task(
             &mut app,
             &mut list,
             f.path(),
             KeyCode::Char('b'),
+            KeyModifiers::NONE,
             &mut params,
         )
         .unwrap();
@@ -463,7 +502,7 @@ mod tests {
             buf: "abc".to_string(),
             cursor: 3,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Right, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Right, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(params.buf, "abc");
         assert_eq!(params.cursor, 3);
     }
@@ -478,9 +517,9 @@ mod tests {
             buf: "hello".to_string(),
             cursor: 5,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Home, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Home, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(params.cursor, 0);
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::End, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::End, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(params.cursor, 5);
     }
 
@@ -494,7 +533,7 @@ mod tests {
             buf: "abc".to_string(),
             cursor: 1,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Delete, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Delete, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(params.buf, "ac");
         assert_eq!(params.cursor, 1);
     }
@@ -514,6 +553,7 @@ mod tests {
             &mut list,
             f.path(),
             KeyCode::Char('l'),
+            KeyModifiers::NONE,
             &mut params,
         )
         .unwrap();
@@ -533,7 +573,7 @@ mod tests {
             buf: "New task".to_string(),
             cursor: 8,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(app.mode, Mode::Normal);
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 2);
@@ -550,7 +590,7 @@ mod tests {
             buf: "   ".to_string(),
             cursor: 3,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 1);
     }
@@ -567,7 +607,7 @@ mod tests {
             buf: "Updated text".to_string(),
             cursor: 12,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks[0].text, "Updated text");
     }
@@ -591,7 +631,7 @@ mod tests {
             buf: "Another".to_string(),
             cursor: 7,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].children[0].tasks.len(), 2);
         assert_eq!(parsed.sections[0].children[0].tasks[1].text, "Another");
@@ -610,7 +650,7 @@ mod tests {
             buf: "New".to_string(),
             cursor: 3,
         };
-        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_task(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
 
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].tasks.len(), 3);
@@ -629,7 +669,7 @@ mod tests {
             buf: "2025-06-15".to_string(),
             cursor: 10,
         };
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(
             parsed.sections[0].tasks[0].due,
@@ -647,12 +687,13 @@ mod tests {
             buf: "2025".to_string(),
             cursor: 4,
         };
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Left, &mut params).unwrap();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Left, KeyModifiers::NONE, &mut params).unwrap();
         handle_input_due(
             &mut app,
             &mut list,
             f.path(),
             KeyCode::Char('-'),
+            KeyModifiers::NONE,
             &mut params,
         )
         .unwrap();
@@ -670,7 +711,7 @@ mod tests {
             buf: String::new(),
             cursor: 0,
         };
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert!(parsed.sections[0].tasks[0].due.is_none());
     }
@@ -685,7 +726,7 @@ mod tests {
             buf: "not-a-date".to_string(),
             cursor: 10,
         };
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert!(parsed.sections[0].tasks[0].due.is_none());
     }
@@ -698,7 +739,7 @@ mod tests {
             buf: "2025".to_string(),
             cursor: 4,
         };
-        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Esc, &mut params).unwrap();
+        handle_input_due(&mut app, &mut list, f.path(), KeyCode::Esc, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -712,7 +753,7 @@ mod tests {
             buf: "work".to_string(),
             cursor: 4,
         };
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 2);
         assert_eq!(parsed.sections[1].name, "work");
@@ -733,6 +774,7 @@ mod tests {
             &mut list,
             f.path(),
             KeyCode::Char('m'),
+            KeyModifiers::NONE,
             &mut params,
         )
         .unwrap();
@@ -750,7 +792,7 @@ mod tests {
             buf: "new_name".to_string(),
             cursor: 8,
         };
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].name, "new_name");
     }
@@ -765,7 +807,7 @@ mod tests {
             buf: "second".to_string(),
             cursor: 6,
         };
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 3);
         assert_eq!(parsed.sections[0].name, "first");
@@ -783,7 +825,7 @@ mod tests {
             buf: "child".to_string(),
             cursor: 5,
         };
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections[0].name, "main");
         assert_eq!(parsed.sections[0].children.len(), 1);
@@ -800,7 +842,7 @@ mod tests {
             buf: "partial".to_string(),
             cursor: 7,
         };
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Esc, &mut params).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Esc, KeyModifiers::NONE, &mut params).unwrap();
         assert_eq!(app.mode, Mode::Normal);
     }
 
@@ -814,7 +856,7 @@ mod tests {
             buf: "   ".to_string(),
             cursor: 3,
         };
-        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, &mut params).unwrap();
+        handle_input_section(&mut app, &mut list, f.path(), KeyCode::Enter, KeyModifiers::NONE, &mut params).unwrap();
         let parsed = parse_file(f.path()).unwrap();
         assert_eq!(parsed.sections.len(), 1);
     }

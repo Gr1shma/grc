@@ -2,8 +2,9 @@ use crate::parser::write_file;
 use crate::task::{NodePath, TodoList};
 use crate::tui::state::{AppState, ClipboardItem, Focus, Mode};
 use crate::tui::{
-    build_tree_items, child_count, get_task_from_ref, get_task_from_ref_mut, get_task_refs,
-    insert_section, node_name, rebuild_and_select, remove_section, selected_node,
+    build_tree_items, child_count, get_task_from_ref, get_task_from_ref_mut,
+    get_task_refs_filtered, insert_section, node_name, rebuild_and_select, remove_section,
+    selected_node,
 };
 use anyhow::Result;
 use crossterm::event::KeyCode;
@@ -20,6 +21,17 @@ pub fn handle_normal(
         return Ok(false);
     }
 
+    if code == KeyCode::Char('/') {
+        app.mode = Mode::Filter;
+        return Ok(false);
+    }
+
+    if code == KeyCode::Esc && !app.filter.is_empty() {
+        app.filter.clear();
+        app.filter_lower.clear();
+        return Ok(false);
+    }
+
     if app.pending_d {
         app.pending_d = false;
         if code == KeyCode::Char('d') {
@@ -29,6 +41,8 @@ pub fn handle_normal(
             }
             return Ok(false);
         }
+        // Mismatched key: cancel pending operation, discard the key
+        return Ok(false);
     }
 
     if app.pending_g {
@@ -45,6 +59,8 @@ pub fn handle_normal(
             }
             return Ok(false);
         }
+        // Mismatched key: cancel pending operation, discard the key
+        return Ok(false);
     }
 
     if app.pending_y {
@@ -56,12 +72,37 @@ pub fn handle_normal(
             }
             return Ok(false);
         }
+        // Mismatched key: cancel pending operation, discard the key
+        return Ok(false);
     }
 
     match app.focus {
         Focus::Left => handle_normal_left(app, todo_list, path, code),
         Focus::Right => handle_normal_right(app, todo_list, path, code),
     }
+}
+
+pub fn handle_filter(app: &mut AppState, code: KeyCode) -> Result<()> {
+    match code {
+        KeyCode::Esc => {
+            app.filter.clear();
+            app.filter_lower.clear();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Enter => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Backspace => {
+            app.filter.pop();
+            app.filter_lower = app.filter.to_lowercase();
+        }
+        KeyCode::Char(c) => {
+            app.filter.push(c);
+            app.filter_lower = app.filter.to_lowercase();
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn handle_normal_left(
@@ -204,7 +245,7 @@ fn handle_normal_right(
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if let Some(node) = selected_node(app) {
-                let max = get_task_refs(todo_list, &node).len().saturating_sub(1);
+                let max = get_task_refs_filtered(todo_list, &node, &app.filter_lower).len().saturating_sub(1);
                 let cur = app.right_state.selected().unwrap_or(0);
                 app.right_state.select(Some((cur + 1).min(max)));
             }
@@ -216,10 +257,11 @@ fn handle_normal_right(
         KeyCode::Char(' ' | 'x') | KeyCode::Enter => {
             if let Some(node) = selected_node(app) {
                 let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 if let Some(ref_item) = refs.get(cur) {
-                    let task = get_task_from_ref_mut(todo_list, ref_item);
-                    task.is_done = !task.is_done;
+                    if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
+                        task.is_done = !task.is_done;
+                    }
                     write_file(path, todo_list)?;
                 }
             }
@@ -230,36 +272,38 @@ fn handle_normal_right(
         KeyCode::Char('i') => {
             if let Some(node) = selected_node(app) {
                 let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 if let Some(ref_item) = refs.get(cur) {
-                    let task = get_task_from_ref(todo_list, ref_item);
-                    let cursor = task.text.chars().count();
-                    app.mode = Mode::InputTask {
-                        editing_idx: Some(cur),
-                        insert_idx: None,
-                        above: false,
-                        buf: task.text.clone(),
-                        cursor,
-                    };
+                    if let Some(task) = get_task_from_ref(todo_list, ref_item) {
+                        let cursor = task.text.chars().count();
+                        app.mode = Mode::InputTask {
+                            editing_idx: Some(cur),
+                            insert_idx: None,
+                            above: false,
+                            buf: task.text.clone(),
+                            cursor,
+                        };
+                    }
                 }
             }
         }
         KeyCode::Char('t') => {
             if let Some(node) = selected_node(app) {
                 let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 if let Some(ref_item) = refs.get(cur) {
-                    let task = get_task_from_ref(todo_list, ref_item);
-                    let existing = task
-                        .due
-                        .map(|d| d.format("%Y-%m-%d").to_string())
-                        .unwrap_or_default();
-                    let cursor = existing.chars().count();
-                    app.mode = Mode::InputDue {
-                        task_idx: cur,
-                        buf: existing,
-                        cursor,
-                    };
+                    if let Some(task) = get_task_from_ref(todo_list, ref_item) {
+                        let existing = task
+                            .due
+                            .map(|d| d.format("%Y-%m-%d").to_string())
+                            .unwrap_or_default();
+                        let cursor = existing.chars().count();
+                        app.mode = Mode::InputDue {
+                            task_idx: cur,
+                            buf: existing,
+                            cursor,
+                        };
+                    }
                 }
             }
         }
@@ -280,7 +324,7 @@ fn handle_normal_right(
         }
         KeyCode::Char('G') => {
             if let Some(node) = selected_node(app) {
-                let max = get_task_refs(todo_list, &node).len().saturating_sub(1);
+                let max = get_task_refs_filtered(todo_list, &node, &app.filter_lower).len().saturating_sub(1);
                 app.right_state.select(Some(max));
             }
         }
@@ -327,9 +371,12 @@ fn handle_normal_right_add_task(app: &mut AppState, code: KeyCode) {
 pub fn delete_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
     if let Some(node) = selected_node(app) {
         let cur = app.right_state.selected().unwrap_or(0);
-        let refs = get_task_refs(todo_list, &node);
+        let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
         if let Some(ref_item) = refs.get(cur) {
-            let task = get_task_from_ref(todo_list, ref_item).clone();
+            let task = match get_task_from_ref(todo_list, ref_item) {
+                Some(t) => t.clone(),
+                None => return Ok(()),
+            };
             app.clipboard = Some(ClipboardItem::Task(task));
 
             let node_clone = ref_item.node.clone();
@@ -338,7 +385,7 @@ pub fn delete_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) ->
                 sec.tasks.remove(task_idx);
             }
             write_file(path, todo_list)?;
-            let new_len = get_task_refs(todo_list, &node).len();
+            let new_len = get_task_refs_filtered(todo_list, &node, &app.filter_lower).len();
             if new_len == 0 {
                 app.right_state.select(Some(0));
                 app.focus = Focus::Left;
@@ -371,9 +418,12 @@ pub fn delete_tree_node(app: &mut AppState, todo_list: &mut TodoList, path: &Pat
 pub fn yank_task(app: &mut AppState, todo_list: &TodoList) {
     if let Some(node) = selected_node(app) {
         let cur = app.right_state.selected().unwrap_or(0);
-        let refs = get_task_refs(todo_list, &node);
+        let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
         if let Some(ref_item) = refs.get(cur) {
-            let task = get_task_from_ref(todo_list, ref_item).clone();
+            let task = match get_task_from_ref(todo_list, ref_item) {
+                Some(t) => t.clone(),
+                None => return,
+            };
             app.clipboard = Some(ClipboardItem::Task(task));
         }
     }
@@ -401,7 +451,7 @@ pub fn paste_clipboard(
     match clip {
         ClipboardItem::Task(task) => {
             if let Some(node) = selected_node(app) {
-                let refs = get_task_refs(todo_list, &node);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 let cur = app.right_state.selected().unwrap_or(0);
 
                 let (target_node, ins_idx) = if app.focus == Focus::Right {
@@ -455,16 +505,18 @@ pub fn paste_clipboard(
                     };
                     (parent, idx)
                 };
-                let new_path = insert_section(todo_list, parent_opt.as_ref(), idx, sec);
-                write_file(path, todo_list)?;
-                app.mode = Mode::Normal;
-                rebuild_and_select(app, todo_list, &new_path);
+                if let Ok(new_path) = insert_section(todo_list, parent_opt.as_ref(), idx, sec) {
+                    let _ = write_file(path, todo_list);
+                    app.mode = Mode::Normal;
+                    rebuild_and_select(app, todo_list, &new_path);
+                }
                 app.right_state.select(Some(0));
             } else {
                 let idx = if above { 0 } else { todo_list.sections.len() };
-                let new_path = insert_section(todo_list, None, idx, sec);
-                write_file(path, todo_list)?;
-                rebuild_and_select(app, todo_list, &new_path);
+                if let Ok(new_path) = insert_section(todo_list, None, idx, sec) {
+                    let _ = write_file(path, todo_list);
+                    rebuild_and_select(app, todo_list, &new_path);
+                }
             }
         }
     }

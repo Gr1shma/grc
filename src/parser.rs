@@ -52,7 +52,8 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
                 todo_list.sections.push(new_section);
                 stack.push((level, vec![todo_list.sections.len() - 1]));
             } else {
-                let parent = get_node_mut(&mut todo_list, &parent_path).expect("parent must exist");
+                let parent = get_node_mut(&mut todo_list, &parent_path)
+                    .ok_or_else(|| anyhow::anyhow!("Malformed markdown: parent section not found for path {:?}", parent_path))?;
                 parent.children.push(new_section);
                 let mut p = parent_path.clone();
                 p.push(parent.children.len() - 1);
@@ -69,14 +70,26 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
             let mut task_text = trimmed[5..].trim().to_string();
 
             let mut due = None;
-            if let Some(idx) = task_text.find("due:") {
+            // Find "due:" only when preceded by start-of-string or whitespace
+            if let Some(idx) = task_text
+                .find("due:")
+                .filter(|&i| i == 0 || task_text.as_bytes()[i - 1] == b' ')
+            {
                 let date_str = task_text[idx + 4..].split_whitespace().next().unwrap_or("");
-                if let Ok(parsed_date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                // Try absolute date first, then relative date shortcuts
+                let parsed_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                    .ok()
+                    .or_else(|| resolve_relative_date(date_str));
+                if let Some(parsed_date) = parsed_date {
                     due = Some(parsed_date);
-                    task_text = task_text
-                        .replace(&format!("due:{date_str}"), "")
-                        .trim()
-                        .to_string();
+                    let due_token_len = 4 + date_str.len();
+                    task_text = format!(
+                        "{}{}",
+                        task_text[..idx].trim_end(),
+                        task_text[idx + due_token_len..].trim_start()
+                    )
+                    .trim()
+                    .to_string();
                 }
             }
 
@@ -86,9 +99,12 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
                 due,
             };
 
-            if let Some((_, path)) = stack.last()
-                && let Some(sec) = get_node_mut(&mut todo_list, path)
-            {
+            if let Some((_, path)) = stack.last() {
+                if let Some(sec) = get_node_mut(&mut todo_list, path) {
+                    sec.tasks.push(task);
+                }
+            } else if let Some(sec) = todo_list.sections.last_mut() {
+                // Attach tasks before any heading to the last section
                 sec.tasks.push(task);
             }
         }
@@ -98,13 +114,27 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
 }
 
 pub fn write_file(path: &Path, todo_list: &TodoList) -> Result<()> {
-    let mut file = File::create(path)?;
-    let mut first = true;
-    let mut last_wrote_tasks = false;
+    // Atomic write: write to temp file then rename
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    // Use a unique temp file name with random component
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = dir.join(format!(".grc_{}_{}.tmp", std::process::id(), nanos));
 
-    for sec in &todo_list.sections {
-        write_section(&mut file, sec, 1, &mut first, &mut last_wrote_tasks)?;
+    {
+        let mut file = File::create(&temp_path)?;
+        let mut first = true;
+        let mut last_wrote_tasks = false;
+
+        for sec in &todo_list.sections {
+            write_section(&mut file, sec, 1, &mut first, &mut last_wrote_tasks)?;
+        }
     }
+
+    std::fs::rename(&temp_path, path)?;
     Ok(())
 }
 

@@ -31,6 +31,7 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
         )]),
         Line::from("    q            - Quit application"),
         Line::from("    ?            - Toggle this help menu"),
+        Line::from("    /            - Filter tasks & sections (live search)"),
         Line::from("    Tab          - Switch panel focus (Left / Right)"),
         Line::from(""),
         Line::from(vec![Span::styled(
