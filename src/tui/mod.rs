@@ -5,15 +5,16 @@ pub mod state;
 use crate::parser::parse_file;
 use crate::task::{NodePath, Section, Task, TodoList, get_node, get_node_mut};
 use crate::tui::input::{InputDueParams, InputSectionParams, InputTaskParams};
-use crate::tui::state::{AppState, Mode, TreeItem};
+use crate::tui::state::{AppState, Focus, Mode, TreeItem};
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyModifiers},
+    event::{self, Event, KeyModifiers, MouseButton, MouseEvent},
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size},
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use std::io::{self, stdout};
 use std::path::Path;
 
@@ -21,6 +22,7 @@ pub fn run_tui(path: &Path) -> Result<()> {
     enable_raw_mode().context("enable raw mode")?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen).context("enter alternate screen")?;
+    execute!(out, event::EnableMouseCapture).context("enable mouse capture")?;
     let backend = CrosstermBackend::new(out);
     let mut term = Terminal::new(backend).context("create terminal")?;
 
@@ -33,6 +35,7 @@ pub fn run_tui(path: &Path) -> Result<()> {
             let _ = disable_raw_mode();
             let _ = execute!(self.term.backend_mut(), LeaveAlternateScreen);
             let _ = self.term.show_cursor();
+            let _ = execute!(self.term.backend_mut(), event::DisableMouseCapture);
         }
     }
 
@@ -67,105 +70,221 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
         sync_selection_states(&mut app, &todo_list);
         term.draw(|f| render::draw_ui(f, &todo_list, &mut app))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == event::KeyCode::Char('c')
+        let (columns, rows) = size()?;
+        let area = Rect::new(0, 0, columns, rows);
+
+        match event::read()? {
+            Event::Key(key) if key.modifiers.contains(KeyModifiers::CONTROL)
+                && key.code == event::KeyCode::Char('c') =>
             {
                 break;
             }
 
-            let quit = match &app.mode {
-                Mode::Normal => input::handle_normal(&mut app, &mut todo_list, path, key.code)?,
-                Mode::Help => {
-                    if key.code == event::KeyCode::Esc
-                        || key.code == event::KeyCode::Char('q')
-                        || key.code == event::KeyCode::Char('?')
-                    {
-                        app.mode = Mode::Normal;
-                    } else if key.code == event::KeyCode::Char('/') {
-                        app.mode = Mode::Filter;
-                        app.left_state.select(Some(0));
-                        app.right_state.select(Some(0));
-                    } else if key.code == event::KeyCode::Down || key.code == event::KeyCode::Char('j') {
-                        app.help_scroll = app.help_scroll.saturating_add(1);
-                    } else if key.code == event::KeyCode::Up || key.code == event::KeyCode::Char('k') {
-                        app.help_scroll = app.help_scroll.saturating_sub(1);
+            Event::Key(key) => {
+                let quit = match &app.mode {
+                    Mode::Normal => input::handle_normal(&mut app, &mut todo_list, path, key.code)?,
+                    Mode::Help => {
+                        if key.code == event::KeyCode::Esc
+                            || key.code == event::KeyCode::Char('q')
+                            || key.code == event::KeyCode::Char('?')
+                        {
+                            app.mode = Mode::Normal;
+                        } else if key.code == event::KeyCode::Char('/') {
+                            app.mode = Mode::Filter;
+                            app.left_state.select(Some(0));
+                            app.right_state.select(Some(0));
+                        } else if key.code == event::KeyCode::Down || key.code == event::KeyCode::Char('j') {
+                            app.help_scroll = app.help_scroll.saturating_add(1);
+                        } else if key.code == event::KeyCode::Up || key.code == event::KeyCode::Char('k') {
+                            app.help_scroll = app.help_scroll.saturating_sub(1);
+                        }
+                        false
                     }
-                    false
-                }
-                Mode::InputTask {
-                    editing_idx,
-                    insert_idx,
-                    above,
-                    buf,
-                    cursor,
-                } => {
-                    let mut params = InputTaskParams {
-                        editing_idx: *editing_idx,
-                        insert_idx: *insert_idx,
-                        above: *above,
-                        buf: buf.clone(),
-                        cursor: *cursor,
-                    };
-                    input::handle_input_task(
-                        &mut app,
-                        &mut todo_list,
-                        path,
-                        key.code,
-                        key.modifiers,
-                        &mut params,
-                    )?;
-                    false
-                }
-                Mode::InputDue {
-                    task_idx,
-                    buf,
-                    cursor,
-                } => {
-                    let mut params = InputDueParams {
-                        task_idx: *task_idx,
-                        buf: buf.clone(),
-                        cursor: *cursor,
-                    };
-                    input::handle_input_due(&mut app, &mut todo_list, path, key.code, key.modifiers, &mut params)?;
-                    false
-                }
-                Mode::InputSection {
-                    node,
-                    parent,
-                    insert_idx,
-                    buf,
-                    cursor,
-                } => {
-                    let mut params = InputSectionParams {
-                        node: node.clone(),
-                        parent: parent.clone(),
-                        insert_idx: *insert_idx,
-                        buf: buf.clone(),
-                        cursor: *cursor,
-                    };
-                    input::handle_input_section(
-                        &mut app,
-                        &mut todo_list,
-                        path,
-                        key.code,
-                        key.modifiers,
-                        &mut params,
-                    )?;
-                    false
-                }
-                Mode::Filter => {
-                    input::handle_filter(&mut app, key.code)?;
-                    false
-                }
-            };
+                    Mode::InputTask {
+                        editing_idx,
+                        insert_idx,
+                        above,
+                        buf,
+                        cursor,
+                    } => {
+                        let mut params = InputTaskParams {
+                            editing_idx: *editing_idx,
+                            insert_idx: *insert_idx,
+                            above: *above,
+                            buf: buf.clone(),
+                            cursor: *cursor,
+                        };
+                        input::handle_input_task(
+                            &mut app,
+                            &mut todo_list,
+                            path,
+                            key.code,
+                            key.modifiers,
+                            &mut params,
+                        )?;
+                        false
+                    }
+                    Mode::InputDue {
+                        task_idx,
+                        buf,
+                        cursor,
+                    } => {
+                        let mut params = InputDueParams {
+                            task_idx: *task_idx,
+                            buf: buf.clone(),
+                            cursor: *cursor,
+                        };
+                        input::handle_input_due(&mut app, &mut todo_list, path, key.code, key.modifiers, &mut params)?;
+                        false
+                    }
+                    Mode::InputSection {
+                        node,
+                        parent,
+                        insert_idx,
+                        buf,
+                        cursor,
+                    } => {
+                        let mut params = InputSectionParams {
+                            node: node.clone(),
+                            parent: parent.clone(),
+                            insert_idx: *insert_idx,
+                            buf: buf.clone(),
+                            cursor: *cursor,
+                        };
+                        input::handle_input_section(
+                            &mut app,
+                            &mut todo_list,
+                            path,
+                            key.code,
+                            key.modifiers,
+                            &mut params,
+                        )?;
+                        false
+                    }
+                    Mode::Filter => {
+                        input::handle_filter(&mut app, key.code)?;
+                        false
+                    }
+                };
 
-            if quit {
-                break;
+                if quit {
+                    break;
+                }
             }
+
+            Event::Mouse(evt) => handle_mouse(&mut app, &todo_list, area, evt),
+
+            Event::Resize(_, _) => {}
+
+            _ => {}
         }
     }
     Ok(())
+}
+
+fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, evt: MouseEvent) {
+    use crossterm::event::MouseEventKind;
+
+    if matches!(
+        app.mode,
+        Mode::InputTask { .. }
+            | Mode::InputDue { .. }
+            | Mode::InputSection { .. }
+            | Mode::Filter
+    ) {
+        app.pending_d = false;
+        app.pending_g = false;
+        app.pending_y = false;
+        return;
+    }
+
+    let MouseEvent { kind, column, row, .. } = evt;
+
+    if app.mode == Mode::Help {
+        if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+            let delta = if matches!(kind, MouseEventKind::ScrollUp) { -1i16 } else { 1i16 };
+            handle_mouse_scroll(app, todo_list, delta);
+            return;
+        }
+        if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
+            let popup_width = area.width * 55 / 100;
+            let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+            let y = area.y + (area.height.saturating_sub(34)) / 2;
+            let inside = column >= x
+                && column < x + popup_width.min(area.width)
+                && row >= y
+                && row < y + 34.min(area.height);
+            if !inside {
+                app.mode = Mode::Normal;
+            }
+        }
+        return;
+    }
+
+    match kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let delta = if matches!(kind, MouseEventKind::ScrollUp) { -1i16 } else { 1i16 };
+            handle_mouse_scroll(app, todo_list, delta);
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if row >= area.height - 1 {
+                return;
+            }
+
+            let total_width = area.width;
+            let left_width = total_width * 27 / 100;
+
+            if column < left_width {
+                app.focus = Focus::Left;
+                let idx = (row - 1) as usize;
+                if idx < app.tree_items.len() {
+                    app.left_state.select(Some(idx));
+                }
+            } else {
+                app.focus = Focus::Right;
+                if let Some(node) = selected_node(app) {
+                    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+                    let idx = (row - 1) as usize;
+                    if idx < refs.len() {
+                        app.right_state.select(Some(idx));
+                        return;
+                    }
+                }
+                if !app.tree_items.is_empty() {
+                    app.left_state.select(Some(
+                        app.left_state.selected().unwrap_or(0).min(app.tree_items.len() - 1)
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_mouse_scroll(app: &mut AppState, todo_list: &TodoList, delta: i16) {
+    if app.mode == Mode::Help {
+        app.help_scroll = app.help_scroll.saturating_add_signed(delta);
+        return;
+    }
+    match app.focus {
+        Focus::Left => {
+            let max = app.tree_items.len().saturating_sub(1);
+            let cur = app.left_state.selected().unwrap_or(0) as i16;
+            app.left_state.select(Some(
+                cur.saturating_add(delta).min(max as i16).max(0) as usize
+            ));
+        }
+        Focus::Right => {
+            if let Some(node) = selected_node(app) {
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+                let max = refs.len().saturating_sub(1);
+                let cur = app.right_state.selected().unwrap_or(0) as i16;
+                app.right_state.select(Some(
+                    cur.saturating_add(delta).min(max as i16).max(0) as usize
+                ));
+            }
+        }
+    }
 }
 
 fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
