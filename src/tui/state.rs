@@ -65,6 +65,9 @@ pub struct AppState {
     pub help_scroll: u16,
     pub filter: String,
     pub filter_lower: String,
+    pub filter_restore_node: Option<NodePath>,
+    pub filter_restore_task_node: Option<NodePath>,
+    pub filter_restore_task_idx: Option<usize>,
 }
 
 impl AppState {
@@ -88,6 +91,9 @@ impl AppState {
             help_scroll: 0,
             filter: String::new(),
             filter_lower: String::new(),
+            filter_restore_node: None,
+            filter_restore_task_node: None,
+            filter_restore_task_idx: None,
         }
     }
 }

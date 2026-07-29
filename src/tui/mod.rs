@@ -67,6 +67,31 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
 
     loop {
         app.tree_items = build_visible_tree_items(&todo_list, &app.mode, &app.filter_lower);
+        if let Some(node) = app.filter_restore_node.take() {
+            if let Some(pos) = app
+                .tree_items
+                .iter()
+                .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
+            {
+                app.left_state.select(Some(pos));
+                if let (Some(task_node), Some(task_idx)) = (
+                    app.filter_restore_task_node.take(),
+                    app.filter_restore_task_idx.take(),
+                ) {
+                    let refs = get_task_refs_filtered(&todo_list, &node, "");
+                    if let Some(new_pos) = refs
+                        .iter()
+                        .position(|r| r.node == task_node && r.task_idx == task_idx)
+                    {
+                        app.right_state.select(Some(new_pos));
+                    } else {
+                        app.right_state.select(Some(0));
+                    }
+                } else {
+                    app.right_state.select(Some(0));
+                }
+            }
+        }
         sync_selection_states(&mut app, &todo_list);
         term.draw(|f| render::draw_ui(f, &todo_list, &mut app))?;
 
@@ -162,7 +187,7 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
                         false
                     }
                     Mode::Filter => {
-                        input::handle_filter(&mut app, key.code)?;
+                        input::handle_filter(&mut app, &todo_list, key.code)?;
                         false
                     }
                 };
@@ -423,6 +448,11 @@ pub fn get_task_refs_filtered(
     let refs = get_task_refs(todo_list, node);
     if filter_lower.is_empty() {
         return refs;
+    }
+    if let Some(sec) = get_node(todo_list, node) {
+        if section_matches(sec, filter_lower) {
+            return refs;
+        }
     }
     refs.into_iter()
         .filter(|r| {
@@ -767,6 +797,29 @@ mod tests {
     }
 
     #[test]
+    fn get_task_refs_filtered_shows_all_tasks_when_top_level_section_matches() {
+        let list = sample_todo_list();
+        let refs = get_task_refs_filtered(&list, &vec![0], "work");
+        assert_eq!(refs.len(), 4);
+    }
+
+    #[test]
+    fn get_task_refs_filtered_shows_direct_tasks_when_nested_section_matches() {
+        let list = sample_todo_list();
+        let refs = get_task_refs_filtered(&list, &vec![0, 0], "backend");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].node, vec![0, 0]);
+        assert_eq!(refs[0].task_idx, 0);
+    }
+
+    #[test]
+    fn get_task_refs_filtered_still_filters_when_section_does_not_match() {
+        let list = sample_todo_list();
+        let refs = get_task_refs_filtered(&list, &vec![0], "milk");
+        assert!(refs.is_empty());
+    }
+
+    #[test]
     fn count_tasks_includes_all_descendants() {
         let list = sample_todo_list();
         assert_eq!(count_tasks(&list.sections[0]), 4);
@@ -899,5 +952,68 @@ mod tests {
         assert_eq!(child_count(&list, None), 2);
         assert_eq!(child_count(&list, Some(&vec![0])), 1);
         assert_eq!(child_count(&list, Some(&vec![0, 0])), 1);
+    }
+
+    #[test]
+    fn filter_restore_node_reselects_after_tree_rebuild() {
+        let list = sample_todo_list();
+        let mut app = AppState::new(list.sections.len());
+        app.tree_items = build_tree_items(&list, &app.mode);
+        app.filter_restore_node = Some(vec![0, 0]);
+
+        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "backend");
+        if let Some(node) = app.filter_restore_node.take() {
+            if let Some(pos) = app
+                .tree_items
+                .iter()
+                .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
+            {
+                app.left_state.select(Some(pos));
+                app.right_state.select(Some(0));
+            }
+        }
+
+        assert_eq!(app.left_state.selected(), Some(1));
+        assert_eq!(app.right_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn filter_restore_task_reselects_after_tree_rebuild() {
+        let list = sample_todo_list();
+        let mut app = AppState::new(list.sections.len());
+        app.tree_items = build_tree_items(&list, &app.mode);
+        app.filter_restore_node = Some(vec![0]);
+        app.filter_restore_task_node = Some(vec![0, 0]);
+        app.filter_restore_task_idx = Some(0);
+
+        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "backend");
+        if let Some(node) = app.filter_restore_node.take() {
+            if let Some(pos) = app
+                .tree_items
+                .iter()
+                .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
+            {
+                app.left_state.select(Some(pos));
+                if let (Some(task_node), Some(task_idx)) = (
+                    app.filter_restore_task_node.take(),
+                    app.filter_restore_task_idx.take(),
+                ) {
+                    let refs = get_task_refs_filtered(&list, &node, "");
+                    if let Some(new_pos) = refs
+                        .iter()
+                        .position(|r| r.node == task_node && r.task_idx == task_idx)
+                    {
+                        app.right_state.select(Some(new_pos));
+                    } else {
+                        app.right_state.select(Some(0));
+                    }
+                } else {
+                    app.right_state.select(Some(0));
+                }
+            }
+        }
+
+        assert_eq!(app.left_state.selected(), Some(0));
+        assert_eq!(app.right_state.selected(), Some(2));
     }
 }

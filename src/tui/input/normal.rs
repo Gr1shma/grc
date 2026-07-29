@@ -32,6 +32,17 @@ pub fn handle_normal(
     }
 
     if code == KeyCode::Esc && !app.filter.is_empty() {
+        app.filter_restore_node = selected_node(app);
+        if app.focus == Focus::Right {
+            if let Some(node) = selected_node(app) {
+                let cur = app.right_state.selected().unwrap_or(0);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+                if let Some(ref_item) = refs.get(cur) {
+                    app.filter_restore_task_node = Some(ref_item.node.clone());
+                    app.filter_restore_task_idx = Some(ref_item.task_idx);
+                }
+            }
+        }
         app.filter.clear();
         app.filter_lower.clear();
         return Ok(false);
@@ -87,9 +98,20 @@ pub fn handle_normal(
     }
 }
 
-pub fn handle_filter(app: &mut AppState, code: KeyCode) -> Result<()> {
+pub fn handle_filter(app: &mut AppState, todo_list: &TodoList, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => {
+            app.filter_restore_node = selected_node(app);
+            if app.focus == Focus::Right {
+                if let Some(node) = selected_node(app) {
+                    let cur = app.right_state.selected().unwrap_or(0);
+                    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+                    if let Some(ref_item) = refs.get(cur) {
+                        app.filter_restore_task_node = Some(ref_item.node.clone());
+                        app.filter_restore_task_idx = Some(ref_item.task_idx);
+                    }
+                }
+            }
             app.filter.clear();
             app.filter_lower.clear();
             app.mode = Mode::Normal;
@@ -791,5 +813,46 @@ mod tests {
         assert_eq!(parsed.sections[0].tasks[1].text, "C task");
         assert_eq!(parsed.sections[0].tasks[2].text, "B task");
         assert!(parsed.sections[0].tasks[2].due.is_none());
+    }
+
+    #[test]
+    fn handle_filter_esc_saves_selected_node_for_restore() {
+        let (_f, mut app, list) = setup("# main\n## sub1\n- [ ] Task A\n## sub2\n- [ ] Task B\n");
+        app.tree_items = build_tree_items(&list, &app.mode);
+        app.left_state.select(Some(1));
+
+        handle_filter(&mut app, &list, KeyCode::Esc).unwrap();
+
+        assert!(app.filter.is_empty());
+        assert!(app.filter_lower.is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.filter_restore_node, Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn handle_filter_enter_does_not_set_restore_node() {
+        let (_f, mut app, list) = setup("# main\n## sub1\n- [ ] Task A\n");
+        app.tree_items = build_tree_items(&list, &app.mode);
+        app.left_state.select(Some(1));
+
+        handle_filter(&mut app, &list, KeyCode::Enter).unwrap();
+
+        assert_eq!(app.filter_restore_node, None);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn handle_normal_esc_saves_selected_node_for_restore() {
+        let (f, mut app, mut list) = setup("# main\n## sub1\n- [ ] Task A\n## sub2\n- [ ] Task B\n");
+        app.tree_items = build_tree_items(&list, &app.mode);
+        app.left_state.select(Some(1));
+        app.filter = "sub".to_string();
+        app.filter_lower = "sub".to_string();
+
+        handle_normal(&mut app, &mut list, f.path(), KeyCode::Esc).unwrap();
+
+        assert!(app.filter.is_empty());
+        assert!(app.filter_lower.is_empty());
+        assert_eq!(app.filter_restore_node, Some(vec![0, 0]));
     }
 }
