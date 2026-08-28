@@ -1,5 +1,4 @@
 use crate::task::TodoList;
-use crate::tui::count_tasks;
 use crate::tui::state::{AppState, Focus, Mode, TreeItem};
 use ratatui::{
     Frame,
@@ -88,7 +87,7 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
                         Span::styled(after, Style::default().fg(Color::White)),
                     ]))
                 } else if let Some(sec) = crate::task::get_node(todo_list, path) {
-                    let n = count_tasks(sec);
+                    let n = sec.count_tasks();
                     let (fg, modifier) = if depth == 0 {
                         (Color::Yellow, Modifier::BOLD)
                     } else {

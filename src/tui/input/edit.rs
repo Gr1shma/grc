@@ -1,9 +1,9 @@
-use crate::parser::{resolve_relative_date, write_file};
+use crate::parser::{parse_due_token, resolve_relative_date, write_file};
 use crate::task::{NodePath, Section, Task, TodoList};
 use crate::tui::state::{AppState, Focus, Mode};
 use crate::tui::{
     build_tree_items, get_task_from_ref_mut, get_task_refs_filtered, insert_section,
-    rebuild_and_select, selected_node,
+    node_task_count, rebuild_and_select, selected_node,
 };
 use anyhow::Result;
 use crossterm::event::KeyCode;
@@ -51,6 +51,37 @@ fn move_right(cursor: &mut usize, buf: &str) {
     }
 }
 
+/// Handle common text-editing keys (cursor movement, insertion, deletion).
+/// Returns `true` if the key was consumed, `false` if the caller should handle it.
+fn handle_text_editing(
+    buf: &mut String,
+    cursor: &mut usize,
+    code: KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) -> bool {
+    match code {
+        KeyCode::Backspace => backspace_at_cursor(buf, cursor),
+        KeyCode::Delete => delete_at_cursor(buf, *cursor),
+        KeyCode::Left => move_left(cursor),
+        KeyCode::Right => move_right(cursor, buf),
+        KeyCode::Home | KeyCode::Char('a')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            *cursor = 0;
+        }
+        KeyCode::End | KeyCode::Char('e')
+            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        {
+            *cursor = buf.chars().count();
+        }
+        KeyCode::Home => *cursor = 0,
+        KeyCode::End => *cursor = buf.chars().count(),
+        KeyCode::Char(c) => insert_at_cursor(buf, cursor, c),
+        _ => return false,
+    }
+    true
+}
+
 pub struct InputTaskParams {
     pub editing_idx: Option<usize>,
     pub insert_idx: Option<usize>,
@@ -75,38 +106,9 @@ pub fn handle_input_task(
             commit_input_task(app, todo_list, path, params)?;
             app.mode = Mode::Normal;
         }
-        KeyCode::Backspace => {
-            backspace_at_cursor(&mut params.buf, &mut params.cursor);
+        _ => {
+            handle_text_editing(&mut params.buf, &mut params.cursor, code, modifiers);
         }
-        KeyCode::Delete => {
-            delete_at_cursor(&mut params.buf, params.cursor);
-        }
-        KeyCode::Left => {
-            move_left(&mut params.cursor);
-        }
-        KeyCode::Right => {
-            move_right(&mut params.cursor, &params.buf);
-        }
-        KeyCode::Home | KeyCode::Char('a')
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-        {
-            params.cursor = 0;
-        }
-        KeyCode::End | KeyCode::Char('e')
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-        {
-            params.cursor = params.buf.chars().count();
-        }
-        KeyCode::Home => {
-            params.cursor = 0;
-        }
-        KeyCode::End => {
-            params.cursor = params.buf.chars().count();
-        }
-        KeyCode::Char(c) => {
-            insert_at_cursor(&mut params.buf, &mut params.cursor, c);
-        }
-        _ => {}
     }
 
     if matches!(app.mode, Mode::InputTask { .. }) {
@@ -145,7 +147,7 @@ fn commit_input_task(
     if let Some(node) = selected_node(app) {
         match editing_idx {
             None => {
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
 
                 let anchor =
                     insert_idx.map_or(refs.len(), |p| if *above { p } else { p.saturating_sub(1) });
@@ -162,18 +164,13 @@ fn commit_input_task(
                 );
 
                 if let Some(sec) = crate::task::get_node_mut(todo_list, &target_node) {
-                    sec.tasks.insert(
-                        ins_idx,
-                        Task {
-                            text,
-                            is_done: false,
-                            due,
-                        },
-                    );
+                    let mut new_task = Task::new(text);
+                    new_task.due = due;
+                    sec.tasks.insert(ins_idx, new_task);
                 }
                 write_file(path, todo_list)?;
                 app.tree_items = build_tree_items(todo_list, &app.mode);
-                let new_refs = get_task_refs_filtered(todo_list, &node, &app.filter);
+                let new_refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 if let Some(pos) = new_refs
                     .iter()
                     .position(|r| r.node == target_node && r.task_idx == ins_idx)
@@ -187,7 +184,7 @@ fn commit_input_task(
                 app.focus = Focus::Right;
             }
             Some(idx) => {
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 if let Some(ref_item) = refs.get(*idx) {
                     if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
                         task.text = text;
@@ -210,18 +207,33 @@ fn extract_inline_due(text: &str) -> (String, Option<chrono::NaiveDate>) {
         .find("due:")
         .filter(|&i| i == 0 || text.as_bytes()[i - 1] == b' ')
     {
-        let date_str = text[idx + 4..].split_whitespace().next().unwrap_or("");
-        let parsed = resolve_relative_date(date_str);
-        if parsed.is_some() || !date_str.is_empty() {
-            let due_token_len = 4 + date_str.len();
-            let cleaned = format!(
-                "{}{}",
-                text[..idx].trim_end(),
-                text[idx + due_token_len..].trim_start()
-            )
-            .trim()
-            .to_string();
-            return (cleaned, parsed);
+        let after_due = &text[idx + 4..];
+        if let Some((parsed, consumed)) = parse_due_token(after_due) {
+            let before = text[..idx].trim_end();
+            let after = after_due[consumed..].trim_start();
+            let cleaned = if before.is_empty() {
+                after.to_string()
+            } else if after.is_empty() {
+                before.to_string()
+            } else {
+                format!("{before} {after}")
+            };
+            return (cleaned, Some(parsed));
+        }
+        // No parseable date, but a non-empty token was provided: strip it.
+        let first_word = after_due.split_whitespace().next().unwrap_or("");
+        if !first_word.is_empty() {
+            let due_token_len = 4 + first_word.len();
+            let before = text[..idx].trim_end();
+            let after = text[idx + due_token_len..].trim_start();
+            let cleaned = if before.is_empty() {
+                after.to_string()
+            } else if after.is_empty() {
+                before.to_string()
+            } else {
+                format!("{before} {after}")
+            };
+            return (cleaned, None);
         }
     }
     (text.to_string(), None)
@@ -253,7 +265,7 @@ pub fn handle_input_due(
         }
         KeyCode::Enter => {
             if let Some(node) = selected_node(app) {
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter);
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
                 if let Some(ref_item) = refs.get(*task_idx) {
                     if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
                         let trimmed = buf.trim();
@@ -268,38 +280,9 @@ pub fn handle_input_due(
             }
             app.mode = Mode::Normal;
         }
-        KeyCode::Backspace => {
-            backspace_at_cursor(buf, cursor);
+        _ => {
+            handle_text_editing(buf, cursor, code, modifiers);
         }
-        KeyCode::Delete => {
-            delete_at_cursor(buf, *cursor);
-        }
-        KeyCode::Left => {
-            move_left(cursor);
-        }
-        KeyCode::Right => {
-            move_right(cursor, buf);
-        }
-        KeyCode::Home | KeyCode::Char('a')
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-        {
-            *cursor = 0;
-        }
-        KeyCode::End | KeyCode::Char('e')
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-        {
-            *cursor = buf.chars().count();
-        }
-        KeyCode::Home => {
-            *cursor = 0;
-        }
-        KeyCode::End => {
-            *cursor = buf.chars().count();
-        }
-        KeyCode::Char(c) => {
-            insert_at_cursor(buf, cursor, c);
-        }
-        _ => {}
     }
 
     if matches!(app.mode, Mode::InputDue { .. }) {
@@ -340,34 +323,6 @@ pub fn handle_input_section(
         KeyCode::Esc => {
             app.mode = Mode::Normal;
         }
-        KeyCode::Backspace => {
-            backspace_at_cursor(buf, cursor);
-        }
-        KeyCode::Delete => {
-            delete_at_cursor(buf, *cursor);
-        }
-        KeyCode::Left => {
-            move_left(cursor);
-        }
-        KeyCode::Right => {
-            move_right(cursor, buf);
-        }
-        KeyCode::Home | KeyCode::Char('a')
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-        {
-            *cursor = 0;
-        }
-        KeyCode::End | KeyCode::Char('e')
-            if modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
-        {
-            *cursor = buf.chars().count();
-        }
-        KeyCode::Home => {
-            *cursor = 0;
-        }
-        KeyCode::End => {
-            *cursor = buf.chars().count();
-        }
         KeyCode::Enter => {
             let name = buf.trim().to_string();
             if !name.is_empty() {
@@ -397,10 +352,9 @@ pub fn handle_input_section(
             }
             app.mode = Mode::Normal;
         }
-        KeyCode::Char(c) => {
-            insert_at_cursor(buf, cursor, c);
+        _ => {
+            handle_text_editing(buf, cursor, code, modifiers);
         }
-        _ => {}
     }
 
     if matches!(app.mode, Mode::InputSection { .. }) {
@@ -413,10 +367,6 @@ pub fn handle_input_section(
         };
     }
     Ok(())
-}
-
-fn node_task_count(todo_list: &TodoList, node: &NodePath) -> usize {
-    crate::task::get_node(todo_list, node).map_or(0, |s| s.tasks.len())
 }
 
 #[cfg(test)]
@@ -925,6 +875,27 @@ mod tests {
         let (text, due) = extract_inline_due("due:tomorrow buy milk");
         assert_eq!(text, "buy milk");
         assert!(due.is_some());
+    }
+
+    #[test]
+    fn extract_inline_due_multiword_date() {
+        let (text, due) = extract_inline_due("Submit report due:next monday");
+        assert_eq!(text, "Submit report");
+        assert!(due.is_some());
+    }
+
+    #[test]
+    fn extract_inline_due_multiword_date_with_trailing_text() {
+        let (text, due) = extract_inline_due("Buy milk due:in 3 days then relax");
+        assert_eq!(text, "Buy milk then relax");
+        assert!(due.is_some());
+    }
+
+    #[test]
+    fn extract_inline_due_alternative_separator() {
+        let (text, due) = extract_inline_due("Pay rent due:2025/06/15");
+        assert_eq!(text, "Pay rent");
+        assert_eq!(due, Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap()));
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::tui::state::AppState;
+use crate::tui::{HELP_POPUP_HEIGHT, HELP_POPUP_WIDTH_PERCENT};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -8,7 +9,7 @@ use ratatui::{
 };
 
 pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
-    let popup = centered_rect(55, 34, area);
+    let popup = centered_rect(HELP_POPUP_WIDTH_PERCENT, HELP_POPUP_HEIGHT, area);
     f.render_widget(Clear, popup);
 
     let block = Block::default()

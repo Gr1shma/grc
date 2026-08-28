@@ -29,7 +29,10 @@ pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &mut AppState) {
 
     let panels = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(27), Constraint::Percentage(73)])
+        .constraints([
+            Constraint::Percentage(crate::tui::LEFT_PANEL_PERCENT),
+            Constraint::Percentage(100 - crate::tui::LEFT_PANEL_PERCENT),
+        ])
         .split(chunks[0]);
 
     draw_left(f, todo_list, app, panels[0]);

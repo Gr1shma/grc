@@ -77,6 +77,7 @@ mod tests {
     use clap::Parser;
     use std::env;
     use tempfile::{NamedTempFile, TempDir};
+    use std::io::Write;
 
     #[test]
     fn resolve_todo_path_uses_env_var_when_set() {
@@ -140,7 +141,6 @@ mod tests {
     #[test]
     fn ensure_does_not_overwrite_existing_file() {
         let mut f = NamedTempFile::new().unwrap();
-        use std::io::Write;
         write!(f, "# custom\n- [ ] My task\n").unwrap();
         f.flush().unwrap();
         let path = f.path().to_path_buf();

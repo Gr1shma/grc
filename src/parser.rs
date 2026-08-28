@@ -4,6 +4,7 @@ use chrono::{Datelike, NaiveDate, Weekday};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn resolve_relative_date(input: &str) -> Option<NaiveDate> {
     let cleaned = input.trim().to_lowercase();
@@ -23,8 +24,191 @@ pub fn resolve_relative_date(input: &str) -> Option<NaiveDate> {
         "thu" | "thursday" => Some(next_weekday(today, Weekday::Thu)),
         "fri" | "friday" => Some(next_weekday(today, Weekday::Fri)),
         "sat" | "saturday" => Some(next_weekday(today, Weekday::Sat)),
-        _ => NaiveDate::parse_from_str(&cleaned, "%Y-%m-%d").ok(),
+        _ => parse_additional_formats(&cleaned, today),
     }
+}
+
+/// Parse a weekday name or abbreviation (already lowercased).
+fn parse_weekday(s: &str) -> Option<Weekday> {
+    match s {
+        "sun" | "sunday" => Some(Weekday::Sun),
+        "mon" | "monday" => Some(Weekday::Mon),
+        "tue" | "tuesday" => Some(Weekday::Tue),
+        "wed" | "wednesday" => Some(Weekday::Wed),
+        "thu" | "thursday" => Some(Weekday::Thu),
+        "fri" | "friday" => Some(Weekday::Fri),
+        "sat" | "saturday" => Some(Weekday::Sat),
+        _ => None,
+    }
+}
+
+/// Parse relative offsets such as `+3d`, `-2w`, `+1m`, `+1y`, or the longer
+/// forms `+3 days`, `-2 weeks`, `+1 month`, `+1 year`.
+fn parse_relative_offset(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let s = s.trim();
+    let (sign, rest) = if let Some(r) = s.strip_prefix('+') {
+        (1i64, r)
+    } else if let Some(r) = s.strip_prefix('-') {
+        (-1i64, r)
+    } else {
+        return None;
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let num_end = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if num_end == 0 {
+        return None;
+    }
+    let num: i64 = rest[..num_end].parse().ok()?;
+    let unit = rest[num_end..].trim();
+    let days = match (sign, unit) {
+        (s, "d" | "day" | "days") => s * num,
+        (s, "w" | "week" | "weeks") => s * num * 7,
+        (s, "m" | "month" | "months") => s * num * 30,
+        (s, "y" | "year" | "years") => s * num * 365,
+        _ => return None,
+    };
+    Some(today + chrono::Duration::days(days))
+}
+
+/// Parse natural-language offsets such as `in 3 days`, `in 2 weeks`,
+/// `in 1 month`, `in 1 year`.
+fn parse_in_offset(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let rest = s.trim().strip_prefix("in")?;
+    let rest = rest.trim_start();
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let num: i64 = parts[0].parse().ok()?;
+    let days = match parts[1] {
+        "d" | "day" | "days" => num,
+        "w" | "week" | "weeks" => num * 7,
+        "m" | "month" | "months" => num * 30,
+        "y" | "year" | "years" => num * 365,
+        _ => return None,
+    };
+    Some(today + chrono::Duration::days(days))
+}
+
+/// Parse a month name plus day, e.g. `jun 15`, `january 1`.
+/// Uses the current year, falling back to next year when the date has passed.
+fn parse_month_day(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let mut parts = s.split_whitespace();
+    let month_str = parts.next()?;
+    let day_str = parts.next()?;
+    let day: u32 = day_str.parse().ok()?;
+    let month = month_name_to_num(month_str)?;
+
+    if let Some(date) = NaiveDate::from_ymd_opt(today.year(), month, day) {
+        if date >= today {
+            return Some(date);
+        }
+        return NaiveDate::from_ymd_opt(today.year() + 1, month, day);
+    }
+    NaiveDate::from_ymd_opt(today.year() + 1, month, day)
+}
+
+/// Map a (case-insensitive) month name or 3-letter abbreviation to its number.
+fn month_name_to_num(s: &str) -> Option<u32> {
+    match s.to_ascii_lowercase().as_str() {
+        "jan" | "january" => Some(1),
+        "feb" | "february" => Some(2),
+        "mar" | "march" => Some(3),
+        "apr" | "april" => Some(4),
+        "may" => Some(5),
+        "jun" | "june" => Some(6),
+        "jul" | "july" => Some(7),
+        "aug" | "august" => Some(8),
+        "sep" | "sept" | "september" => Some(9),
+        "oct" | "october" => Some(10),
+        "nov" | "november" => Some(11),
+        "dec" | "december" => Some(12),
+        _ => None,
+    }
+}
+
+/// Try the extra date formats beyond the single-word shortcuts.
+fn parse_additional_formats(cleaned: &str, today: NaiveDate) -> Option<NaiveDate> {
+    // "next <weekday>" and "this <weekday>"
+    for (prefix, only_if_not_today) in [("next ", true), ("this ", false)] {
+        if let Some(rest) = cleaned.strip_prefix(prefix)
+            && let Some(wd) = parse_weekday(rest)
+        {
+            let resolved = next_weekday(today, wd);
+            if !only_if_not_today {
+                if today.weekday() == wd {
+                    return Some(today);
+                }
+                if resolved <= today {
+                    return Some(resolved);
+                }
+            }
+            return Some(resolved);
+        }
+    }
+
+    if let Some(date) = parse_relative_offset(cleaned, today) {
+        return Some(date);
+    }
+
+    if let Some(date) = parse_in_offset(cleaned, today) {
+        return Some(date);
+    }
+
+    if let Some(date) = parse_month_day(cleaned, today) {
+        return Some(date);
+    }
+
+    for fmt in ["%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d"] {
+        if let Ok(date) = NaiveDate::parse_from_str(cleaned, fmt) {
+            return Some(date);
+        }
+    }
+
+    None
+}
+
+/// Try to parse a date from the start of `s`, consuming progressively more
+/// whitespace-separated words (e.g. `next monday`). Returns the parsed date and
+/// the byte offset in `s` just past the matched text.
+pub fn parse_due_token(s: &str) -> Option<(NaiveDate, usize)> {
+    if s.is_empty() {
+        return None;
+    }
+
+    let mut word_ends: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        while i < s.len() && s.as_bytes()[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= s.len() {
+            break;
+        }
+        while i < s.len() && !s.as_bytes()[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        word_ends.push(i);
+    }
+
+    if word_ends.is_empty() {
+        return None;
+    }
+
+    for &end in &word_ends {
+        if let Some(date) = resolve_relative_date(&s[..end]) {
+            return Some((date, end));
+        }
+    }
+
+    None
 }
 
 fn next_weekday(from: NaiveDate, target: Weekday) -> NaiveDate {
@@ -92,29 +276,22 @@ pub fn parse_file(path: &Path) -> Result<TodoList> {
                 .find("due:")
                 .filter(|&i| i == 0 || task_text.as_bytes()[i - 1] == b' ')
             {
-                let date_str = task_text[idx + 4..].split_whitespace().next().unwrap_or("");
-                // Try absolute date first, then relative date shortcuts
-                let parsed_date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-                    .ok()
-                    .or_else(|| resolve_relative_date(date_str));
-                if let Some(parsed_date) = parsed_date {
+                let after_due = &task_text[idx + 4..];
+                if let Some((parsed_date, consumed)) = parse_due_token(after_due) {
                     due = Some(parsed_date);
-                    let due_token_len = 4 + date_str.len();
                     task_text = format!(
                         "{}{}",
                         task_text[..idx].trim_end(),
-                        task_text[idx + due_token_len..].trim_start()
+                        task_text[idx + 4 + consumed..].trim_start()
                     )
                     .trim()
                     .to_string();
                 }
             }
 
-            let task = Task {
-                text: task_text,
-                is_done,
-                due,
-            };
+            let mut task = Task::new(task_text);
+            task.is_done = is_done;
+            task.due = due;
 
             if let Some((_, path)) = stack.last() {
                 if let Some(sec) = get_node_mut(&mut todo_list, path) {
@@ -134,7 +311,6 @@ pub fn write_file(path: &Path, todo_list: &TodoList) -> Result<()> {
     // Atomic write: write to temp file then rename
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     // Use a unique temp file name with random component
-    use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -623,6 +799,99 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_relative_date_extra_formats() {
+        let today = chrono::Local::now().date_naive();
+
+        // Alternative separators
+        assert_eq!(
+            resolve_relative_date("2025/06/15"),
+            Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap())
+        );
+        assert_eq!(
+            resolve_relative_date("2025.06.15"),
+            Some(NaiveDate::from_ymd_opt(2025, 6, 15).unwrap())
+        );
+
+        // "next <weekday>"
+        let next_mon = next_weekday(today, chrono::Weekday::Mon);
+        assert_eq!(resolve_relative_date("next mon"), Some(next_mon));
+        assert_eq!(resolve_relative_date("next monday"), Some(next_mon));
+
+        // Relative offsets
+        assert_eq!(
+            resolve_relative_date("+3d"),
+            Some(today + chrono::Duration::days(3))
+        );
+        assert_eq!(
+            resolve_relative_date("-2d"),
+            Some(today - chrono::Duration::days(2))
+        );
+        assert_eq!(
+            resolve_relative_date("+2w"),
+            Some(today + chrono::Duration::days(14))
+        );
+        assert_eq!(
+            resolve_relative_date("+1m"),
+            Some(today + chrono::Duration::days(30))
+        );
+        assert_eq!(
+            resolve_relative_date("+3 days"),
+            Some(today + chrono::Duration::days(3))
+        );
+
+        // "in N <unit>"
+        assert_eq!(
+            resolve_relative_date("in 5 days"),
+            Some(today + chrono::Duration::days(5))
+        );
+        assert_eq!(
+            resolve_relative_date("in 2 weeks"),
+            Some(today + chrono::Duration::days(14))
+        );
+
+        // month name + day resolves to a valid date
+        let month_day = resolve_relative_date("jun 15").unwrap();
+        assert_eq!(month_day.month(), 6);
+        assert_eq!(month_day.day(), 15);
+        assert!(month_day >= today);
+
+        // unrecognized input
+        assert_eq!(resolve_relative_date("not-a-date"), None);
+        assert_eq!(resolve_relative_date("due"), None);
+    }
+
+    #[test]
+    fn test_parse_due_token_multiword() {
+        let today = chrono::Local::now().date_naive();
+
+        // Single word
+        let (date, consumed) = parse_due_token("2025-06-15 extra").unwrap();
+        assert_eq!(date, NaiveDate::from_ymd_opt(2025, 6, 15).unwrap());
+        assert_eq!(consumed, "2025-06-15".len());
+
+        // Two words: "next monday"
+        let (date, consumed) = parse_due_token("next monday extra").unwrap();
+        assert_eq!(date, next_weekday(today, chrono::Weekday::Mon));
+        assert_eq!(consumed, "next monday".len());
+
+        // Two words: "in 3 days"
+        let (date, consumed) = parse_due_token("in 3 days foo").unwrap();
+        assert_eq!(date, today + chrono::Duration::days(3));
+        assert_eq!(consumed, "in 3 days".len());
+
+        // No parseable date
+        assert!(parse_due_token("not-a-date").is_none());
+        assert!(parse_due_token("").is_none());
+    }
+
+    #[test]
+    fn test_parse_due_token_prefers_shortest_match() {
+        // "tue" matches on its own; the trailing word should not be consumed.
+        let (_, consumed) = parse_due_token("tue foo").unwrap();
+        assert_eq!(consumed, "tue".len());
+    }
+
+    #[test]
     fn test_next_weekday_logic() {
         use chrono::Weekday;
 
@@ -646,5 +915,33 @@ mod tests {
             next_weekday(monday, Weekday::Sun),
             NaiveDate::from_ymd_opt(2025, 7, 27).unwrap()
         );
+    }
+
+    #[test]
+    fn write_read_write_byte_fidelity_roundtrip() {
+        let initial_content = "# Section 1\n\n- [ ] Task 1\n- [x] Task 2 due:2025-10-15\n\n## Sub 1\n\n- [ ] Subtask\n";
+        let f1 = temp_file_with(initial_content);
+        let list1 = parse_file(f1.path()).unwrap();
+
+        let f2 = NamedTempFile::new().unwrap();
+        write_file(f2.path(), &list1).unwrap();
+        let content2 = std::fs::read_to_string(f2.path()).unwrap();
+        assert_eq!(content2, initial_content);
+
+        let list2 = parse_file(f2.path()).unwrap();
+        let f3 = NamedTempFile::new().unwrap();
+        write_file(f3.path(), &list2).unwrap();
+        let content3 = std::fs::read_to_string(f3.path()).unwrap();
+        assert_eq!(content3, content2);
+    }
+
+    #[test]
+    fn parses_tasks_before_first_heading_attached_to_implicit_or_last_section() {
+        // When tasks appear before any heading, parser creates/attaches to section
+        let content = "- [ ] Orphan task\n# Header\n- [ ] Header task\n";
+        let f = temp_file_with(content);
+        let list = parse_file(f.path()).unwrap();
+        // Since `# Header` comes after orphan task, stack was empty, so orphan task was attached to last section when section appeared or dropped if no section before it
+        assert!(!list.sections.is_empty());
     }
 }

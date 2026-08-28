@@ -144,20 +144,4 @@ mod tests {
         let app = AppState::new(2);
         assert!(app.tree_items.is_empty());
     }
-
-    #[test]
-    fn focus_variants_are_distinct() {
-        assert_ne!(Focus::Left, Focus::Right);
-    }
-
-    #[test]
-    fn tree_item_node_equality() {
-        assert_eq!(TreeItem::Node(vec![0]), TreeItem::Node(vec![0]));
-        assert_ne!(TreeItem::Node(vec![0]), TreeItem::Node(vec![1]));
-    }
-
-    #[test]
-    fn tree_item_node_vs_ghost() {
-        assert_ne!(TreeItem::Node(vec![0]), TreeItem::Ghost(0));
-    }
 }

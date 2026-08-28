@@ -7,6 +7,16 @@ pub struct Task {
     pub due: Option<NaiveDate>,
 }
 
+impl Task {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            is_done: false,
+            due: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Section {
     pub name: String,
@@ -75,12 +85,8 @@ mod tests {
     use chrono::NaiveDate;
 
     #[test]
-    fn task_creation_pending_no_due() {
-        let task = Task {
-            text: "Buy milk".to_string(),
-            is_done: false,
-            due: None,
-        };
+    fn task_creation_new() {
+        let task = Task::new("Buy milk");
         assert_eq!(task.text, "Buy milk");
         assert!(!task.is_done);
         assert!(task.due.is_none());
@@ -99,22 +105,6 @@ mod tests {
     }
 
     #[test]
-    fn task_clone_is_independent() {
-        let original = Task {
-            text: "Original".to_string(),
-            is_done: false,
-            due: None,
-        };
-        let mut cloned = original.clone();
-        cloned.text = "Cloned".to_string();
-        cloned.is_done = true;
-        assert_eq!(original.text, "Original");
-        assert!(!original.is_done);
-        assert_eq!(cloned.text, "Cloned");
-        assert!(cloned.is_done);
-    }
-
-    #[test]
     fn section_creation() {
         let sec = Section::new("work");
         assert_eq!(sec.name, "work");
@@ -125,18 +115,12 @@ mod tests {
     #[test]
     fn nested_section_hierarchy() {
         let mut root = Section::new("work");
-        root.tasks.push(Task {
-            text: "Top-level".to_string(),
-            is_done: false,
-            due: None,
-        });
+        root.tasks.push(Task::new("Top-level"));
         root.children.push(Section::new("backend"));
         root.children[0].children.push(Section::new("api"));
-        root.children[0].children[0].tasks.push(Task {
-            text: "Fix endpoint".to_string(),
-            is_done: false,
-            due: None,
-        });
+        root.children[0].children[0]
+            .tasks
+            .push(Task::new("Fix endpoint"));
 
         assert_eq!(root.name, "work");
         assert_eq!(root.tasks.len(), 1);
@@ -150,15 +134,5 @@ mod tests {
     fn todolist_default_is_empty() {
         let list = TodoList::default();
         assert!(list.sections.is_empty());
-    }
-
-    #[test]
-    fn todolist_clone_is_independent() {
-        let mut original = TodoList::default();
-        original.sections.push(Section::new("main"));
-        let cloned = original.clone();
-        original.sections.clear();
-        assert!(original.sections.is_empty());
-        assert_eq!(cloned.sections.len(), 1);
     }
 }

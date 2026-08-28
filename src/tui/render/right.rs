@@ -1,5 +1,6 @@
-use crate::task::{NodePath, Task, TodoList};
+use crate::task::{Task, TodoList};
 use crate::tui::state::{AppState, Focus, Mode};
+use crate::tui::task_ref::full_breadcrumb;
 use crate::tui::{get_task_from_ref, get_task_refs_filtered, selected_node};
 use ratatui::{
     Frame,
@@ -15,7 +16,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
 
     let title = selected_node(app).map_or_else(
         || " Tasks ".to_string(),
-        |path| breadcrumb(todo_list, &path),
+        |path| full_breadcrumb(todo_list, &path),
     );
 
     let border_color = if in_task_input || focused_normal {
@@ -59,17 +60,16 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         _ => (None, None, 0),
     };
 
-    let mut items = build_task_list_items(
-        todo_list,
-        &task_refs,
+    let render_ctx = TaskRenderCtx {
         editing_idx,
         edit_buf,
         edit_cursor,
         due_editing_idx,
         due_buf,
         due_cursor,
-        inner_w,
-    );
+    };
+
+    let mut items = build_task_list_items(todo_list, &task_refs, render_ctx, inner_w);
 
     if let Mode::InputTask {
         editing_idx: None,
@@ -119,15 +119,20 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
     f.render_stateful_widget(list, area, &mut app.right_state);
 }
 
+#[derive(Default)]
+struct TaskRenderCtx<'a> {
+    editing_idx: Option<usize>,
+    edit_buf: Option<&'a str>,
+    edit_cursor: usize,
+    due_editing_idx: Option<usize>,
+    due_buf: Option<&'a str>,
+    due_cursor: usize,
+}
+
 fn build_task_list_items(
     todo_list: &TodoList,
     task_refs: &[crate::tui::TaskRef],
-    editing_idx: Option<usize>,
-    edit_buf: Option<&str>,
-    edit_cursor: usize,
-    due_editing_idx: Option<usize>,
-    due_buf: Option<&str>,
-    due_cursor: usize,
+    ctx: TaskRenderCtx<'_>,
     inner_w: usize,
 ) -> Vec<ListItem<'static>> {
     task_refs
@@ -138,19 +143,19 @@ fn build_task_list_items(
                 Some(t) => t,
                 None => return ListItem::new(Line::from("")),
             };
-            if Some(i) == editing_idx {
+            if Some(i) == ctx.editing_idx {
                 render_editing_row(
-                    edit_buf.unwrap_or(""),
-                    edit_cursor,
+                    ctx.edit_buf.unwrap_or(""),
+                    ctx.edit_cursor,
                     task.is_done,
                     inner_w,
                     ref_item.sub_name.as_deref(),
                 )
-            } else if Some(i) == due_editing_idx {
+            } else if Some(i) == ctx.due_editing_idx {
                 render_due_editing_row(
                     task,
-                    due_buf.unwrap_or(""),
-                    due_cursor,
+                    ctx.due_buf.unwrap_or(""),
+                    ctx.due_cursor,
                     inner_w,
                     ref_item.sub_name.as_deref(),
                 )
@@ -159,21 +164,6 @@ fn build_task_list_items(
             }
         })
         .collect()
-}
-
-fn breadcrumb(todo_list: &TodoList, path: &NodePath) -> String {
-    let mut parts = Vec::new();
-    for (depth, idx) in path.iter().enumerate() {
-        let node = if depth == 0 {
-            todo_list.sections.get(*idx)
-        } else {
-            crate::task::get_node(todo_list, &path[..=depth])
-        };
-        if let Some(sec) = node {
-            parts.push(sec.name.clone());
-        }
-    }
-    parts.join(" › ")
 }
 
 fn render_task_item(task: &Task, width: usize, sub_name: Option<&str>) -> ListItem<'static> {
@@ -208,9 +198,10 @@ fn render_task_item(task: &Task, width: usize, sub_name: Option<&str>) -> ListIt
         (label, style)
     });
 
-    let sub_len = sub_name.map_or(0, |s| s.len() + 3);
-    let text_len = box_ch.len() + sub_len + task.text.len();
-    let due_len = due_info.as_ref().map_or(0, |(s, _)| s.len());
+    let sub_len = sub_name.map_or(0, |s| s.chars().count() + 3);
+    let box_display_width = 4;
+    let text_len = box_display_width + sub_len + task.text.chars().count();
+    let due_len = due_info.as_ref().map_or(0, |(s, _)| s.chars().count());
     let pad = " ".repeat(width.saturating_sub(text_len + due_len));
 
     let mut spans = vec![Span::styled(box_ch, box_style)];

@@ -1,9 +1,16 @@
 pub mod input;
 pub mod render;
+pub mod section_ops;
 pub mod state;
+pub mod task_ref;
+pub mod tree;
+
+pub use section_ops::*;
+pub use task_ref::*;
+pub use tree::*;
 
 use crate::parser::parse_file;
-use crate::task::{NodePath, Section, Task, TodoList, get_node, get_node_mut};
+use crate::task::TodoList;
 use crate::tui::input::{InputDueParams, InputSectionParams, InputTaskParams};
 use crate::tui::state::{AppState, Focus, Mode, TreeItem};
 use anyhow::{Context, Result};
@@ -17,6 +24,15 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use std::io::{self, stdout};
 use std::path::Path;
+
+/// Width of the left (sections) panel as a percentage of the terminal width.
+/// Shared by the renderer and mouse hit-testing so they can never diverge.
+pub const LEFT_PANEL_PERCENT: u16 = 27;
+
+/// Help popup size: width percentage and row height. Shared by the help
+/// renderer and the click-outside-to-close hit test.
+pub const HELP_POPUP_WIDTH_PERCENT: u16 = 55;
+pub const HELP_POPUP_HEIGHT: u16 = 34;
 
 pub fn run_tui(path: &Path) -> Result<()> {
     enable_raw_mode().context("enable raw mode")?;
@@ -67,29 +83,28 @@ fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) ->
 
     loop {
         app.tree_items = build_visible_tree_items(&todo_list, &app.mode, &app.filter_lower);
-        if let Some(node) = app.filter_restore_node.take() {
-            if let Some(pos) = app
+        if let Some(node) = app.filter_restore_node.take()
+            && let Some(pos) = app
                 .tree_items
                 .iter()
                 .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
-            {
-                app.left_state.select(Some(pos));
-                if let (Some(task_node), Some(task_idx)) = (
-                    app.filter_restore_task_node.take(),
-                    app.filter_restore_task_idx.take(),
-                ) {
-                    let refs = get_task_refs_filtered(&todo_list, &node, "");
-                    if let Some(new_pos) = refs
-                        .iter()
-                        .position(|r| r.node == task_node && r.task_idx == task_idx)
-                    {
-                        app.right_state.select(Some(new_pos));
-                    } else {
-                        app.right_state.select(Some(0));
-                    }
+        {
+            app.left_state.select(Some(pos));
+            if let (Some(task_node), Some(task_idx)) = (
+                app.filter_restore_task_node.take(),
+                app.filter_restore_task_idx.take(),
+            ) {
+                let refs = get_task_refs_filtered(&todo_list, &node, "");
+                if let Some(new_pos) = refs
+                    .iter()
+                    .position(|r| r.node == task_node && r.task_idx == task_idx)
+                {
+                    app.right_state.select(Some(new_pos));
                 } else {
                     app.right_state.select(Some(0));
                 }
+            } else {
+                app.right_state.select(Some(0));
             }
         }
         sync_selection_states(&mut app, &todo_list);
@@ -232,13 +247,13 @@ fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, evt: Mouse
             return;
         }
         if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
-            let popup_width = area.width * 55 / 100;
+            let popup_width = area.width * HELP_POPUP_WIDTH_PERCENT / 100;
             let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-            let y = area.y + (area.height.saturating_sub(34)) / 2;
+            let y = area.y + (area.height.saturating_sub(HELP_POPUP_HEIGHT)) / 2;
             let inside = column >= x
                 && column < x + popup_width.min(area.width)
                 && row >= y
-                && row < y + 34.min(area.height);
+                && row < y + HELP_POPUP_HEIGHT.min(area.height);
             if !inside {
                 app.mode = Mode::Normal;
             }
@@ -252,16 +267,20 @@ fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, evt: Mouse
             handle_mouse_scroll(app, todo_list, delta);
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            if row >= area.height - 1 {
+            // Ignore clicks on the top border row (index 0, no items) and the
+            // bottom status-bar row. `row.checked_sub(1)` also guards the
+            // degenerate `area.height == 0` case.
+            let Some(idx) = row.checked_sub(1).map(|r| r as usize) else {
+                return;
+            };
+            if idx + 2 >= area.height as usize {
                 return;
             }
 
-            let total_width = area.width;
-            let left_width = total_width * 27 / 100;
+            let left_width = area.width * LEFT_PANEL_PERCENT / 100;
 
             if column < left_width {
                 app.focus = Focus::Left;
-                let idx = (row - 1) as usize;
                 if idx < app.tree_items.len() {
                     app.left_state.select(Some(idx));
                 }
@@ -269,7 +288,6 @@ fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, evt: Mouse
                 app.focus = Focus::Right;
                 if let Some(node) = selected_node(app) {
                     let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                    let idx = (row - 1) as usize;
                     if idx < refs.len() {
                         app.right_state.select(Some(idx));
                         return;
@@ -338,314 +356,10 @@ fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
     }
 }
 
-pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
-    let ghost = match mode {
-        Mode::InputSection {
-            node: None,
-            parent,
-            insert_idx,
-            ..
-        } => Some((parent.clone(), *insert_idx)),
-        _ => None,
-    };
-
-    let mut items = Vec::new();
-    walk_tree(&mut items, ghost.as_ref(), None, &todo_list.sections, 0);
-    items
-}
-
-pub fn build_visible_tree_items(
-    todo_list: &TodoList,
-    mode: &Mode,
-    filter_lower: &str,
-) -> Vec<TreeItem> {
-    if filter_lower.is_empty() || matches!(mode, Mode::InputSection { .. }) {
-        return build_tree_items(todo_list, mode);
-    }
-    // Two-pass filter: prioritize section name matches, fall back to task matches
-    let mut name_matched_paths: Vec<NodePath> = Vec::new();
-    collect_section_name_matches(&mut name_matched_paths, None, &todo_list.sections, filter_lower);
-
-    let mut items = Vec::new();
-    if !name_matched_paths.is_empty() {
-        // Some section names matched - show only those sections and their ancestors
-        for path in &name_matched_paths {
-            // Add all ancestors
-            for depth in 0..path.len() {
-                let ancestor_path = path[..=depth].to_vec();
-                if !items.iter().any(|item| matches!(item, TreeItem::Node(p) if *p == ancestor_path)) {
-                    items.push(TreeItem::Node(ancestor_path));
-                }
-            }
-        }
-    } else {
-        // No section names matched - fall back to task-based filtering
-        walk_tree_filtered_by_task(&mut items, None, &todo_list.sections, filter_lower);
-    }
-    items
-}
-
-/// Collect paths of sections whose name matches the filter
-fn collect_section_name_matches(
-    paths: &mut Vec<NodePath>,
-    parent: Option<&NodePath>,
-    children: &[Section],
-    filter_lower: &str,
-) {
-    for (i, child) in children.iter().enumerate() {
-        let mut p = parent.map_or_else(Vec::new, Clone::clone);
-        p.push(i);
-        if section_matches(child, filter_lower) {
-            paths.push(p.clone());
-        }
-        collect_section_name_matches(paths, Some(&p), &child.children, filter_lower);
-    }
-}
-
-/// Fallback: show sections that contain matching tasks
-fn walk_tree_filtered_by_task(
-    items: &mut Vec<TreeItem>,
-    parent: Option<&NodePath>,
-    children: &[Section],
-    filter_lower: &str,
-) {
-    for (i, child) in children.iter().enumerate() {
-        let mut p = parent.map_or_else(Vec::new, Clone::clone);
-        p.push(i);
-        let desc_match = subtree_has_matching_task(child, filter_lower);
-        if desc_match {
-            items.push(TreeItem::Node(p.clone()));
-            walk_tree_filtered_by_task(items, Some(&p), &child.children, filter_lower);
-        }
-    }
-}
-
-fn subtree_has_matching_task(sec: &Section, filter_lower: &str) -> bool {
-    if sec.tasks.iter().any(|t| task_matches(t, filter_lower)) {
-        return true;
-    }
-    sec.children.iter().any(|c| subtree_has_matching_task(c, filter_lower))
-}
-
-fn section_matches(sec: &Section, filter_lower: &str) -> bool {
-    sec.name.to_lowercase().contains(filter_lower)
-}
-
-fn task_matches(task: &Task, filter_lower: &str) -> bool {
-    if task.text.to_lowercase().contains(filter_lower) {
-        return true;
-    }
-    task.due.is_some_and(|d| {
-        d.format("%Y-%m-%d").to_string().to_lowercase().contains(filter_lower)
-    })
-}
-
-pub fn get_task_refs_filtered(
-    todo_list: &TodoList,
-    node: &NodePath,
-    filter_lower: &str,
-) -> Vec<TaskRef> {
-    let refs = get_task_refs(todo_list, node);
-    if filter_lower.is_empty() {
-        return refs;
-    }
-    if let Some(sec) = get_node(todo_list, node) {
-        if section_matches(sec, filter_lower) {
-            return refs;
-        }
-    }
-    refs.into_iter()
-        .filter(|r| {
-            get_task_from_ref(todo_list, r)
-                .map(|task| task_matches(task, filter_lower))
-                .unwrap_or(false)
-                || r.sub_name
-                    .as_deref()
-                    .is_some_and(|s| s.to_lowercase().contains(filter_lower))
-        })
-        .collect()
-}
-
-fn walk_tree(
-    items: &mut Vec<TreeItem>,
-    ghost: Option<&(Option<NodePath>, Option<usize>)>,
-    parent: Option<&NodePath>,
-    children: &[Section],
-    depth: usize,
-) {
-    let n = children.len();
-    for (i, child) in children.iter().enumerate() {
-        if let Some((gp, gi)) = ghost
-            && gp.as_deref() == parent.map(Vec::as_slice)
-            && *gi == Some(i)
-        {
-            items.push(TreeItem::Ghost(depth));
-        }
-        let mut p = parent.map_or_else(Vec::new, Clone::clone);
-        p.push(i);
-        items.push(TreeItem::Node(p.clone()));
-        walk_tree(items, ghost, Some(&p), &child.children, depth + 1);
-    }
-    if let Some((gp, gi)) = ghost
-        && gp.as_deref() == parent.map(Vec::as_slice)
-        && (gi.is_none() || *gi == Some(n))
-    {
-        items.push(TreeItem::Ghost(depth));
-    }
-}
-
-pub fn rebuild_and_select(app: &mut AppState, todo_list: &TodoList, path: &NodePath) {
-    app.tree_items = build_tree_items(todo_list, &app.mode);
-    if let Some(pos) = app
-        .tree_items
-        .iter()
-        .position(|i| matches!(i, TreeItem::Node(p) if p == path))
-    {
-        app.left_state.select(Some(pos));
-    }
-}
-
-pub fn selected_node(app: &AppState) -> Option<NodePath> {
-    let idx = app.left_state.selected()?;
-    match app.tree_items.get(idx)? {
-        TreeItem::Node(path) => Some(path.clone()),
-        TreeItem::Ghost(_) => None,
-    }
-}
-
-pub fn node_name(todo_list: &TodoList, node: &NodePath) -> String {
-    get_node(todo_list, node).map_or_else(String::new, |s| s.name.clone())
-}
-
-pub fn count_tasks(sec: &Section) -> usize {
-    sec.count_tasks()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TaskRef {
-    pub node: NodePath,
-    pub task_idx: usize,
-    pub sub_name: Option<String>,
-}
-
-pub fn get_task_refs(todo_list: &TodoList, node: &NodePath) -> Vec<TaskRef> {
-    get_node(todo_list, node).map_or_else(Vec::new, |sec| {
-        if node.len() == 1 {
-            let mut out = Vec::new();
-            collect_flatten(todo_list, node, &mut out);
-            out
-        } else {
-            sec.tasks
-                .iter()
-                .enumerate()
-                .map(|(i, _)| TaskRef {
-                    node: node.clone(),
-                    task_idx: i,
-                    sub_name: None,
-                })
-                .collect()
-        }
-    })
-}
-
-fn collect_flatten(todo_list: &TodoList, node: &NodePath, out: &mut Vec<TaskRef>) {
-    if let Some(sec) = get_node(todo_list, node) {
-        let sub_name = node_breadcrumb(todo_list, node);
-        for (i, _) in sec.tasks.iter().enumerate() {
-            out.push(TaskRef {
-                node: node.clone(),
-                task_idx: i,
-                sub_name: sub_name.clone(),
-            });
-        }
-        let child_count = sec.children.len();
-        for ci in 0..child_count {
-            let mut cp = node.clone();
-            cp.push(ci);
-            collect_flatten(todo_list, &cp, out);
-        }
-    }
-}
-
-fn node_breadcrumb(todo_list: &TodoList, node: &NodePath) -> Option<String> {
-    if node.len() <= 1 {
-        return None;
-    }
-    let parts: Vec<String> = (1..node.len())
-        .filter_map(|k| get_node(todo_list, &node[..=k]))
-        .map(|sec| sec.name.clone())
-        .collect();
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join(" › "))
-    }
-}
-
-pub fn get_task_from_ref<'a>(todo_list: &'a TodoList, ref_item: &TaskRef) -> Option<&'a Task> {
-    let sec = get_node(todo_list, &ref_item.node)?;
-    sec.tasks.get(ref_item.task_idx)
-}
-
-pub fn get_task_from_ref_mut<'a>(todo_list: &'a mut TodoList, ref_item: &TaskRef) -> Option<&'a mut Task> {
-    let sec = get_node_mut(todo_list, &ref_item.node)?;
-    sec.tasks.get_mut(ref_item.task_idx)
-}
-
-pub fn insert_section(
-    todo_list: &mut TodoList,
-    parent: Option<&NodePath>,
-    idx: usize,
-    section: Section,
-) -> Result<NodePath> {
-    match parent {
-        None => {
-            let i = idx.min(todo_list.sections.len());
-            todo_list.sections.insert(i, section);
-            Ok(vec![i])
-        }
-        Some(p) => {
-            let sec = get_node_mut(todo_list, p)
-                .ok_or_else(|| anyhow::anyhow!("Parent section not found for path {:?}", p))?;
-            let i = idx.min(sec.children.len());
-            sec.children.insert(i, section);
-            let mut path = p.clone();
-            path.push(i);
-            Ok(path)
-        }
-    }
-}
-
-pub fn remove_section(todo_list: &mut TodoList, path: &NodePath) -> Option<Section> {
-    if path.is_empty() {
-        return None;
-    }
-    if path.len() == 1 {
-        if path[0] < todo_list.sections.len() {
-            return Some(todo_list.sections.remove(path[0]));
-        }
-        return None;
-    }
-    let parent_path = &path[..path.len() - 1];
-    let idx = *path.last().unwrap();
-    let parent = get_node_mut(todo_list, parent_path)?;
-    if idx < parent.children.len() {
-        Some(parent.children.remove(idx))
-    } else {
-        None
-    }
-}
-
-pub fn child_count(todo_list: &TodoList, path: Option<&NodePath>) -> usize {
-    path.map_or(todo_list.sections.len(), |p| {
-        get_node(todo_list, p).map_or(0, |s| s.children.len())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::TodoList;
+    use crate::task::{Section, Task, TodoList};
     use crate::tui::state::{AppState, Mode, TreeItem};
 
     fn sample_todo_list() -> TodoList {
@@ -822,13 +536,13 @@ mod tests {
     #[test]
     fn count_tasks_includes_all_descendants() {
         let list = sample_todo_list();
-        assert_eq!(count_tasks(&list.sections[0]), 4);
+        assert_eq!(list.sections[0].count_tasks(), 4);
     }
 
     #[test]
     fn count_tasks_section_only() {
         let list = sample_todo_list();
-        assert_eq!(count_tasks(&list.sections[1]), 1);
+        assert_eq!(list.sections[1].count_tasks(), 1);
     }
 
     #[test]
@@ -838,7 +552,7 @@ mod tests {
             tasks: Vec::new(),
             children: Vec::new(),
         };
-        assert_eq!(count_tasks(&sec), 0);
+        assert_eq!(sec.count_tasks(), 0);
     }
 
     #[test]
@@ -962,15 +676,14 @@ mod tests {
         app.filter_restore_node = Some(vec![0, 0]);
 
         app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "backend");
-        if let Some(node) = app.filter_restore_node.take() {
-            if let Some(pos) = app
+        if let Some(node) = app.filter_restore_node.take()
+            && let Some(pos) = app
                 .tree_items
                 .iter()
                 .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
-            {
-                app.left_state.select(Some(pos));
-                app.right_state.select(Some(0));
-            }
+        {
+            app.left_state.select(Some(pos));
+            app.right_state.select(Some(0));
         }
 
         assert_eq!(app.left_state.selected(), Some(1));
@@ -987,29 +700,28 @@ mod tests {
         app.filter_restore_task_idx = Some(0);
 
         app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "backend");
-        if let Some(node) = app.filter_restore_node.take() {
-            if let Some(pos) = app
+        if let Some(node) = app.filter_restore_node.take()
+            && let Some(pos) = app
                 .tree_items
                 .iter()
                 .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
-            {
-                app.left_state.select(Some(pos));
-                if let (Some(task_node), Some(task_idx)) = (
-                    app.filter_restore_task_node.take(),
-                    app.filter_restore_task_idx.take(),
-                ) {
-                    let refs = get_task_refs_filtered(&list, &node, "");
-                    if let Some(new_pos) = refs
-                        .iter()
-                        .position(|r| r.node == task_node && r.task_idx == task_idx)
-                    {
-                        app.right_state.select(Some(new_pos));
-                    } else {
-                        app.right_state.select(Some(0));
-                    }
+        {
+            app.left_state.select(Some(pos));
+            if let (Some(task_node), Some(task_idx)) = (
+                app.filter_restore_task_node.take(),
+                app.filter_restore_task_idx.take(),
+            ) {
+                let refs = get_task_refs_filtered(&list, &node, "");
+                if let Some(new_pos) = refs
+                    .iter()
+                    .position(|r| r.node == task_node && r.task_idx == task_idx)
+                {
+                    app.right_state.select(Some(new_pos));
                 } else {
                     app.right_state.select(Some(0));
                 }
+            } else {
+                app.right_state.select(Some(0));
             }
         }
 
