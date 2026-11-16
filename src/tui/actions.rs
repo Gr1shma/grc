@@ -421,18 +421,25 @@ fn sort(app: &mut AppState, todo_list: &mut TodoList, node: &NodePath) -> bool {
     let Some(section) = get_node_mut(todo_list, node) else {
         return false;
     };
-    sort_section(section);
-    app.set_success("sorted by due date");
-    true
+    let changed = sort_section(section);
+    if changed {
+        app.set_success("sorted by due date");
+    } else {
+        app.set_info("already sorted");
+    }
+    changed
 }
 
-fn sort_section(section: &mut Section) {
+fn sort_section(section: &mut Section) -> bool {
+    let before = section.tasks.clone();
     section
         .tasks
         .sort_by_key(|task| (task.is_done, task.due.is_none(), task.due));
+    let mut changed = before != section.tasks;
     for child in &mut section.children {
-        sort_section(child);
+        changed |= sort_section(child);
     }
+    changed
 }
 
 fn commit_section(
@@ -480,6 +487,7 @@ fn commit_section(
 }
 
 fn move_task(app: &mut AppState, todo_list: &mut TodoList, target: &TaskRef, delta: isize) -> bool {
+    let visible_node = selected_node(app);
     let Some(section) = get_node_mut(todo_list, &target.node) else {
         return false;
     };
@@ -488,13 +496,17 @@ fn move_task(app: &mut AppState, todo_list: &mut TodoList, target: &TaskRef, del
     };
     section.tasks.swap(target.task_idx, new_index);
 
-    let refs = refs_for(app, todo_list, &target.node);
+    let refs = visible_node
+        .as_ref()
+        .map_or_else(Vec::new, |node| refs_for(app, todo_list, node));
     if let Some(position) = refs
         .iter()
         .position(|reference| reference.node == target.node && reference.task_idx == new_index)
     {
         app.focus = Focus::Right;
         app.right_state.select(Some(position));
+    } else {
+        clamp_right_selection(app, refs.len());
     }
     app.set_success(if delta < 0 {
         "task moved up"

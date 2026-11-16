@@ -560,4 +560,204 @@ mod tests {
         assert!(engine.todo_list.sections[0].tasks[0].is_done);
         assert!(to_markdown(&engine.todo_list).contains("- [x] A"));
     }
+
+    #[test]
+    fn count_prefixes_drive_motions_and_multi_delete() {
+        let (_dir, mut engine) = engine("# main\n- [ ] A\n- [ ] B\n- [ ] C\n- [ ] D\n- [ ] E\n");
+        engine.app.focus = Focus::Right;
+        press(&mut engine, KeyCode::Char('5'));
+        press(&mut engine, KeyCode::Char('j'));
+        assert_eq!(engine.app.right_state.selected(), Some(4));
+
+        engine.app.right_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('3'));
+        press(&mut engine, KeyCode::Char('d'));
+        press(&mut engine, KeyCode::Char('d'));
+        let texts: Vec<_> = engine.todo_list.sections[0]
+            .tasks
+            .iter()
+            .map(|task| task.text.as_str())
+            .collect();
+        assert_eq!(texts, ["D", "E"]);
+        assert!(
+            fs::read_to_string(&engine.path)
+                .unwrap()
+                .contains("- [ ] D")
+        );
+
+        press(&mut engine, KeyCode::Char('u'));
+        assert_eq!(engine.todo_list.sections[0].tasks.len(), 5);
+        engine.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(engine.todo_list.sections[0].tasks.len(), 2);
+    }
+
+    #[test]
+    fn fold_keys_collapse_and_expand_the_tree() {
+        let (_dir, mut engine) = engine("# root\n## child\n### grand\n# other\n");
+        assert_eq!(engine.app.tree_items.len(), 4);
+        press(&mut engine, KeyCode::Char('z'));
+        press(&mut engine, KeyCode::Char('a'));
+        assert_eq!(engine.app.tree_items.len(), 2);
+        assert!(engine.app.folded.contains(&vec![0]));
+
+        press(&mut engine, KeyCode::Char('z'));
+        press(&mut engine, KeyCode::Char('R'));
+        assert!(engine.app.folded.is_empty());
+        assert_eq!(engine.app.tree_items.len(), 4);
+
+        press(&mut engine, KeyCode::Char('z'));
+        press(&mut engine, KeyCode::Char('M'));
+        assert!(engine.app.folded.contains(&vec![0]));
+        assert!(engine.app.folded.contains(&vec![0, 0]));
+    }
+
+    #[test]
+    fn hide_done_toggle_only_changes_the_view() {
+        let (_dir, mut engine) = engine("# main\n- [ ] A\n- [x] B\n");
+        let before = fs::read_to_string(&engine.path).unwrap();
+        engine.app.focus = Focus::Right;
+        engine.app.right_state.select(Some(1));
+        press(&mut engine, KeyCode::Char('H'));
+        assert!(engine.app.hide_done);
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+        assert_eq!(
+            get_task_refs_filtered(
+                &engine.todo_list,
+                &vec![0],
+                &engine.app.filter_lower,
+                engine.app.hide_done
+            )
+            .len(),
+            1
+        );
+
+        press(&mut engine, KeyCode::Char('H'));
+        assert!(!engine.app.hide_done);
+        assert_eq!(fs::read_to_string(&engine.path).unwrap(), before);
+    }
+
+    #[test]
+    fn next_overdue_wraps_and_skips_completed_tasks() {
+        let today = NaiveDate::from_ymd_opt(2025, 7, 21).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let two_days_ago = today.pred_opt().unwrap().pred_opt().unwrap();
+        let tomorrow = today.succ_opt().unwrap();
+        let content = format!(
+            "# main\n- [ ] A due:{}\n- [x] B due:{}\n- [ ] C due:{}\n- [ ] D due:{}\n- [ ] E\n",
+            yesterday.format("%Y-%m-%d"),
+            two_days_ago.format("%Y-%m-%d"),
+            two_days_ago.format("%Y-%m-%d"),
+            tomorrow.format("%Y-%m-%d"),
+        );
+        let (_dir, mut engine) = engine(&content);
+        engine.app.today = today;
+        engine.refresh();
+        engine.app.focus = Focus::Right;
+        engine.app.right_state.select(Some(0));
+
+        press(&mut engine, KeyCode::Char(']'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert_eq!(engine.app.right_state.selected(), Some(2));
+        assert_eq!(engine.app.focus, Focus::Right);
+
+        press(&mut engine, KeyCode::Char(']'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn shift_j_and_k_reorder_tasks_and_sections() {
+        let (_dir, mut engine) = engine("# a\n- [ ] A\n- [ ] B\n# b\n- [ ] Bb\n");
+        engine.app.focus = Focus::Right;
+        press(&mut engine, KeyCode::Char('J'));
+        assert_eq!(engine.todo_list.sections[0].tasks[0].text, "B");
+        assert_eq!(engine.app.right_state.selected(), Some(1));
+        press(&mut engine, KeyCode::Char('K'));
+        assert_eq!(engine.todo_list.sections[0].tasks[0].text, "A");
+
+        engine.app.focus = Focus::Left;
+        engine.app.left_state.select(Some(1));
+        press(&mut engine, KeyCode::Char('K'));
+        assert_eq!(engine.todo_list.sections[0].name, "b");
+        assert_eq!(crate::tui::tree::selected_node(&engine.app), Some(vec![0]));
+    }
+
+    #[test]
+    fn colon_sort_key_sorts_recursively_and_ignores_a_second_noop() {
+        let (_dir, mut engine) = engine(
+            "# main\n- [ ] late due:2025-12-01\n- [ ] soon due:2025-06-01\n- [ ] none\n## child\n- [ ] child late due:2025-11-01\n- [ ] child soon due:2025-05-01\n",
+        );
+        engine.app.focus = Focus::Right;
+        press(&mut engine, KeyCode::Char(':'));
+        let texts: Vec<_> = engine.todo_list.sections[0]
+            .tasks
+            .iter()
+            .map(|task| task.text.as_str())
+            .collect();
+        assert_eq!(texts, ["soon", "late", "none"]);
+        let child_texts: Vec<_> = engine.todo_list.sections[0].children[0]
+            .tasks
+            .iter()
+            .map(|task| task.text.as_str())
+            .collect();
+        assert_eq!(child_texts, ["child soon", "child late"]);
+        assert_eq!(engine.undo.len(), 1);
+
+        press(&mut engine, KeyCode::Char(':'));
+        assert_eq!(engine.undo.len(), 1);
+        assert_eq!(engine.app.message.as_ref().unwrap().text, "already sorted");
+    }
+
+    #[test]
+    fn help_overlay_opens_scrolls_and_closes_on_help_keys() {
+        let (_dir, mut engine) = engine("# main\n- [ ] A\n");
+        press(&mut engine, KeyCode::Char('?'));
+        assert_eq!(engine.app.mode, Mode::Help);
+        assert_eq!(engine.app.help_scroll, 0);
+        press(&mut engine, KeyCode::Char('/'));
+        assert_eq!(engine.app.mode, Mode::Help);
+        assert!(engine.app.filter.is_empty());
+        press(&mut engine, KeyCode::Char('j'));
+        assert_eq!(engine.app.help_scroll, 1);
+        press(&mut engine, KeyCode::Char('q'));
+        assert_eq!(engine.app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn filter_key_shows_matches_and_esc_restores_selection() {
+        let (_dir, mut engine) = engine("# alpha\n- [ ] apple\n# beta\n- [ ] banana\n");
+        engine.app.focus = Focus::Right;
+        engine.app.right_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('/'));
+        assert_eq!(engine.app.mode, Mode::Filter);
+        for character in "app".chars() {
+            press(&mut engine, KeyCode::Char(character));
+        }
+        press(&mut engine, KeyCode::Enter);
+        assert_eq!(engine.app.mode, Mode::Normal);
+        assert_eq!(engine.app.filter, "app");
+        assert_eq!(engine.app.tree_items.len(), 1);
+        press(&mut engine, KeyCode::Esc);
+        assert!(engine.app.filter.is_empty());
+        assert_eq!(engine.app.tree_items.len(), 2);
+    }
+
+    #[test]
+    fn add_task_key_creates_saves_and_returns_to_normal() {
+        let (_dir, mut engine) = engine("# main\n");
+        engine.app.focus = Focus::Right;
+        press(&mut engine, KeyCode::Char('a'));
+        assert!(matches!(engine.app.mode, Mode::InputTask(_)));
+        for character in "New".chars() {
+            press(&mut engine, KeyCode::Char(character));
+        }
+        press(&mut engine, KeyCode::Enter);
+        assert_eq!(engine.app.mode, Mode::Normal);
+        assert_eq!(engine.todo_list.sections[0].tasks[0].text, "New");
+        assert!(
+            fs::read_to_string(&engine.path)
+                .unwrap()
+                .contains("- [ ] New")
+        );
+    }
 }

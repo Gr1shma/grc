@@ -32,30 +32,99 @@ By default, `grc` reads and writes `~/.todo.md`. You can specify a file path as 
 GRC_TODO_PATH=/path/to/todo.md grc
 ```
 
+## Interface
+
+```
+╭ Sections ─────────╮╭ Work ───────────────────────────────────────────╮
+│▾ Work         1/5 ││☐ Ship release                            today │
+│    Urgent     0/2 ││☑ Write docs                                    │
+│  Home        0/1 ││☐ Plan next week                    Mar 1, 2027 │
+│                  ││☐ Urgent › Fix bug                           tmr │
+│                  ││☐ Urgent › Call back                            │
+╰───────────────────╯╰─────────────────────────────────────────────────╯
+ j/k move  ·  x toggle  ·  a/o add  ·  i edit  ·  t due  ·  ? help
+ NORMAL                                              1/6  todo.md
+```
+
+The left panel is the section tree; the right panel shows the selected section's
+tasks. A focused panel has an accent border and bold title. The bottom two lines
+are a context-sensitive hint bar and a status bar. The status bar shows the mode
+pill, a transient message (`saved`, `pasted`, errors), overall progress, and the
+file name. Due dates are right-aligned and coloured by urgency; completed tasks
+are dimmed and struck through. A scrollbar appears at the panel's right edge
+only when its content overflows.
+
+Set `NO_COLOR=1` to disable colour, and `GRC_ASCII=1` for ASCII checkboxes
+(`[ ]` / `[x]`), fold markers (`>` / `v`), and scrollbars. Neither option
+changes the file format.
+
 ## Keybindings
 
-Press `?` inside the app to open the full help overlay.
+Press `?` in the app for the same list, grouped as Navigate / Edit / Dates / Misc.
+A count prefix applies to `j`/`k` motions and to multi-task `dd`; other commands
+ignore it.
+
+### Global
 
 | Key | Action |
 |-----|--------|
-| `/` | Filter (live search across sections and tasks) |
-| `Esc` | Clear active filter (when one is set) |
-| `j` / `k` | Move down / up |
-| `l` / `Enter` | Focus task panel |
-| `h` / `Esc` | Back to sections |
-| `Tab` | Switch panel |
-| `a` | New heading one level **below** (child of current) |
-| `A` | New heading one level **up** (above the current subtree) |
-| `o` | New heading at same level, **below** current |
-| `O` | New heading at same level, **above** current |
-| `i` | Rename / edit heading |
-| `t` | Set due date (empty clears; invalid input keeps the old date) |
-| `x` / `Space` | Toggle done |
-| `dd` | Delete |
-| `yy` / `p` / `P` | Yank / paste below / paste above |
-| `gg` / `G` | Jump top / bottom |
-| `:` | Recursively sort the selected section by due date (task panel) |
-| `q` | Quit |
+| `j` / `k` (or `↓` / `↑`) | Move down / up in the focused panel |
+| `5j` / `3k` | Move five down / three up |
+| `gg` / `G` | Jump to top / bottom |
+| `H` | Hide or show completed tasks |
+| `u` / `Ctrl-r` | Undo / redo (bounded to 100 document snapshots) |
+| `/` | Open the live filter |
+| `Esc` | Clear the filter when one is set |
+| `?` | Open the help overlay; close it with `?`, `Esc`, or `q` |
+| `q` / `Ctrl-c` | Save and quit |
+
+### Sections panel (left)
+
+| Key | Action |
+|-----|--------|
+| `l` / `Enter` / `Tab` | Focus the task panel |
+| `a` / `A` | New child section / new section above the current level |
+| `o` / `O` | New section at the same level below / above |
+| `i` | Rename the selected section |
+| `dd` | Delete the section and its subtree |
+| `yy` / `p` / `P` | Yank section / paste below / paste above |
+| `J` / `K` | Move the section down / up among its siblings |
+| `za` / `zM` / `zR` | Toggle fold / fold all / unfold all |
+| `]d` | Jump to the next overdue task and focus the task panel |
+
+### Tasks panel (right)
+
+| Key | Action |
+|-----|--------|
+| `h` / `Esc` / `Tab` | Return to the sections panel |
+| `j` / `k` (or `↓` / `↑`) | Move down / up |
+| `Space` / `x` / `Enter` | Toggle done |
+| `a` / `o` / `O` / `A` | Add task below / below / above / append |
+| `i` / `t` | Edit task text / edit due date |
+| `dd` / `3dd` | Delete selected task / next three tasks |
+| `yy` / `p` / `P` | Yank task / paste below / paste above |
+| `:` | Recursively sort the selected section by due date |
+| `J` / `K` | Move the task down / up among its siblings |
+| `]d` | Jump to the next overdue task (wraps, skips completed) |
+| `H` | Hide or show completed tasks |
+
+### Text inputs, filter, help, and conflict
+
+| Key | Action |
+|-----|--------|
+| `Enter` / `Esc` | Confirm / cancel a text input |
+| `←` / `→`, `Home` / `End` | Move the text cursor |
+| `Ctrl-a` / `Ctrl-e` | Move to start / end of input |
+| `Backspace` / `Delete` | Delete before / at the cursor |
+| type, `Backspace`, `Enter`, `Esc` | Filter prompt: append, delete, apply, clear |
+| `j` / `k`, `Esc` / `q` / `?` | Scroll / close the help overlay |
+| `r` / `o` | On an external-change conflict: reload / overwrite |
+
+The filter is an append-only prompt: `Backspace` removes the last character.
+Text inputs (task, section, due date) use the full cursor editor above.
+When editing a task, a parseable `due:` token is highlighted and its resolved
+date previewed inline; an invalid token is shown in red and never clears the
+existing date.
 
 ## Due Date Shortcuts
 
