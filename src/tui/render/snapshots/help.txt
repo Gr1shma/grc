@@ -1,8 +1,8 @@
 ╭ Sections ─╭ Keybindings ─────────────────────────────────────────╮───────────╮
-│▾ Work     │  Navigate                                            │      today│
-│    Urgent │    j/k, ↓/↑            move or scroll                │           │
-│  Home     │    gg / G              top / bottom                  │Mar 1, 2027│
-│           │    5j / 3k             count motion                  │        tmr│
+│ ▾ Work    │  Navigate                                            │     today │
+│ │   Urgent│    j/k, ↓/↑            move or scroll                │           │
+│   Home    │    gg / G              top / bottom                  │ar 1, 2027 │
+│           │    5j / 3k             count motion                  │       tmr │
 │           │    l/Enter             focus tasks                   │           │
 │           │    h/Esc/Tab           back to sections              │           │
 │           │    J / K               move task/section             │           │

@@ -7,7 +7,8 @@ use crate::tui::task_ref::{TaskRef, full_breadcrumb, get_task_from_ref, get_task
 use crate::tui::theme::{DueUrgency, Theme};
 use crate::tui::tree::selected_node;
 use crate::tui::widgets::{
-    border_scrollbar, display_width, highlight, list_offset, split_at_char, truncate_ellipsis,
+    GUTTER, border_scrollbar, display_width, highlight, list_offset, panel, split_at_char,
+    truncate_ellipsis,
 };
 use chrono::{Datelike, NaiveDate};
 use ratatui::Frame;
@@ -15,8 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
-    ScrollbarState,
+    Block, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
 /// Draw the task list for the selected section.
@@ -26,16 +26,12 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &T
     let title = selected_node(app)
         .map(|path| full_breadcrumb(todo_list, &path))
         .unwrap_or_else(|| "Tasks".to_string());
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(format!(" {title} "), theme.title(focused)))
-        .border_style(theme.border(focused));
+    let block = panel(theme, &title, focused);
 
     let task_refs = selected_node(app)
         .map(|node| get_task_refs_filtered(todo_list, &node, &app.filter_lower, app.hide_done))
         .unwrap_or_default();
-    let width = usize::from(area.width.saturating_sub(2));
+    let width = usize::from(area.width.saturating_sub(2 + GUTTER as u16));
     let ctx = RowContext {
         app,
         theme,
@@ -113,10 +109,19 @@ struct RowContext<'a> {
     width: usize,
 }
 
+/// Blank cells between the panel border and the checkbox column.
+fn gutter() -> Span<'static> {
+    Span::raw(" ".repeat(GUTTER))
+}
+
 fn task_item(ctx: &RowContext<'_>, task: &Task, task_ref: &TaskRef) -> ListItem<'static> {
     let (glyph, glyph_style) = ctx.theme.checkbox(task.is_done);
-    let mut spans = vec![Span::styled(glyph.to_string(), glyph_style), Span::raw(" ")];
-    let mut used = display_width(glyph) + 1;
+    let mut spans = vec![
+        gutter(),
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(" "),
+    ];
+    let mut used = GUTTER + display_width(glyph) + 1;
 
     if let Some(name) = &task_ref.sub_name {
         let breadcrumb = format!("{name} {} ", ctx.theme.glyphs.breadcrumb_sep);
@@ -162,7 +167,11 @@ fn editing_item(
     sub_name: Option<&str>,
 ) -> ListItem<'static> {
     let (glyph, glyph_style) = ctx.theme.checkbox(is_done);
-    let mut spans = vec![Span::styled(glyph.to_string(), glyph_style), Span::raw(" ")];
+    let mut spans = vec![
+        gutter(),
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(" "),
+    ];
     if let Some(name) = sub_name {
         spans.push(Span::styled(
             format!("{name} {} ", ctx.theme.glyphs.breadcrumb_sep),
@@ -184,7 +193,11 @@ fn editing_item(
 
 fn ghost_item(ctx: &RowContext<'_>, field: &TextField) -> ListItem<'static> {
     let (glyph, glyph_style) = ctx.theme.checkbox(false);
-    let mut spans = vec![Span::styled(glyph.to_string(), glyph_style), Span::raw(" ")];
+    let mut spans = vec![
+        gutter(),
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(" "),
+    ];
     let due = inline_due(&field.buf, ctx.today);
     spans.extend(buffer_spans(
         field,
@@ -205,8 +218,12 @@ fn due_editing_item(
     sub_name: Option<&str>,
 ) -> ListItem<'static> {
     let (glyph, glyph_style) = ctx.theme.checkbox(task.is_done);
-    let mut spans = vec![Span::styled(glyph.to_string(), glyph_style), Span::raw(" ")];
-    let mut used = display_width(glyph) + 1;
+    let mut spans = vec![
+        gutter(),
+        Span::styled(glyph.to_string(), glyph_style),
+        Span::raw(" "),
+    ];
+    let mut used = GUTTER + display_width(glyph) + 1;
     if let Some(name) = sub_name {
         let breadcrumb = format!("{name} {} ", ctx.theme.glyphs.breadcrumb_sep);
         used += display_width(&breadcrumb);
@@ -279,7 +296,10 @@ fn empty_state<'a>(
         }
     };
     let style = theme.dim_style();
-    let hint = Line::from(vec![Span::raw("  "), Span::styled(text.to_string(), style)]);
+    let hint = Line::from(vec![
+        Span::raw(" ".repeat(GUTTER + 1)),
+        Span::styled(text.to_string(), style),
+    ]);
     Paragraph::new(hint).block(block)
 }
 

@@ -1,10 +1,10 @@
 //! Centered popup geometry and dialog chrome.
 
 use crate::tui::theme::Theme;
-use crate::tui::widgets::percentage;
+use crate::tui::widgets::{BORDER_TYPE, percentage};
 use ratatui::layout::Rect;
 use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::widgets::{Block, Borders};
 
 /// Center a popup with a percentage width and fixed height, clamped to `area`.
 pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
@@ -22,7 +22,7 @@ pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
 pub fn dialog<'a>(theme: &Theme, title: impl Into<String>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
+        .border_type(BORDER_TYPE)
         .title(Span::styled(
             format!(" {} ", title.into()),
             theme.dialog_title(),

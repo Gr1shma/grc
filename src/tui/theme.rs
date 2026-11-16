@@ -24,6 +24,8 @@ pub struct Glyphs {
     pub fold_open: &'static str,
     /// Collapsed section marker.
     pub fold_closed: &'static str,
+    /// Vertical guide connecting a nested section to its parent.
+    pub tree_guide: &'static str,
     /// Inline edit cursor.
     pub cursor: &'static str,
     /// Separator between a task and its child-section breadcrumb.
@@ -48,6 +50,7 @@ impl Glyphs {
             checkbox_done: "☑",
             fold_open: "▾",
             fold_closed: "▸",
+            tree_guide: "│",
             cursor: "│",
             breadcrumb_sep: "›",
             invalid_due: "!",
@@ -65,6 +68,7 @@ impl Glyphs {
             checkbox_done: "[x]",
             fold_open: "v",
             fold_closed: ">",
+            tree_guide: "|",
             cursor: "|",
             breadcrumb_sep: ">",
             invalid_due: "!",
@@ -207,6 +211,21 @@ impl Theme {
         Style::default()
             .fg(self.dim)
             .add_modifier(Modifier::CROSSED_OUT)
+    }
+
+    /// Section name in the tree. Top-level sections are emphasised; nested
+    /// sections stay plain so depth reads through the guides instead.
+    pub fn section_name_style(&self, depth: usize) -> Style {
+        if depth == 0 {
+            self.text_style().add_modifier(Modifier::BOLD)
+        } else {
+            self.text_style()
+        }
+    }
+
+    /// Tree guide bars drawn to the left of nested sections.
+    pub fn tree_guide(&self) -> Style {
+        Style::default().fg(self.dim)
     }
 
     /// Progress counters and other quiet metadata.

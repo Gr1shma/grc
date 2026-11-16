@@ -1,9 +1,9 @@
 ╭ Sections╮╭ Work ─────────────────────╮
-│▾ Wo… 1/5││☐ Ship release        today│
-│    U 0/2││☑ Write docs               │
-│  Ho… 0/1││☐ Plan next we… Mar 1, 2027│
-│         ││☐ Urgent › Fix bug      tmr│
-│         ││☐ Urgent › Call back       │
+│ ▾ Work  ││ ☐ Ship release      today │
+│ │   Urg…││ ☑ Write docs              │
+│   Home  ││ ☐ Plan next … Mar 1, 2027 │
+│         ││ ☐ Urgent › Fix bug    tmr │
+│         ││ ☐ Urgent › Call back      │
 │         ││                           │
 ╰─────────╯╰───────────────────────────╯
  j/k move  ·  x toggle  ·  a/o add  ·  i

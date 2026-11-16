@@ -1,18 +1,21 @@
 //! Section tree panel.
 
-use crate::task::{TodoList, get_node};
+use crate::task::{TodoList, child_count, get_node};
 use crate::tui::state::{AppState, Focus, Mode, TextField, TreeItem};
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{
-    border_scrollbar, display_width, highlight, list_offset, split_at_char, truncate_ellipsis,
+    GUTTER, border_scrollbar, display_width, highlight, list_offset, panel, split_at_char,
+    truncate_ellipsis,
 };
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState,
-};
+use ratatui::widgets::{List, ListItem, Scrollbar, ScrollbarOrientation, ScrollbarState};
+
+/// Cells a section name must keep before the tree drops its `done/total`
+/// counter, so a narrow panel never renders a nameless row.
+const MIN_NAME_WIDTH: usize = 4;
 
 /// Draw the section tree.
 pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Theme, area: Rect) {
@@ -23,15 +26,11 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
         );
 
     let title = if app.filter.is_empty() {
-        " Sections "
+        "Sections"
     } else {
-        " Sections · filtered "
+        "Sections · filtered"
     };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(Span::styled(title, theme.title(focused)))
-        .border_style(theme.border(focused));
+    let block = panel(theme, title, focused);
 
     let (renaming_node, rename_field, ghost_field) = match &app.mode {
         Mode::InputSection(input) => (input.node.as_ref(), Some(&input.field), Some(&input.field)),
@@ -65,22 +64,24 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
                 };
 
                 let renaming = renaming_node.is_some_and(|node| node == path);
-                let name_style = if depth == 0 {
-                    theme
-                        .text_style()
-                        .add_modifier(ratatui::style::Modifier::BOLD)
-                } else {
-                    theme.text_style()
-                };
+                let name_style = theme.section_name_style(depth);
 
                 let total = section.count_tasks();
                 let done = section.count_done_tasks();
-                let progress = if total == 0 {
+                let prefix_width = depth * 2 + GUTTER + 2;
+                let counter = if total == 0 {
                     String::new()
                 } else {
                     format!("{done}/{total}")
                 };
-                let prefix_width = depth * 2 + 2;
+                // The name is what identifies the row, so a narrow panel drops
+                // the counter rather than truncating the name away entirely.
+                let progress =
+                    if prefix_width + display_width(&counter) + 1 + MIN_NAME_WIDTH > inner_width {
+                        String::new()
+                    } else {
+                        counter
+                    };
                 let progress_width = display_width(&progress);
                 let gap = usize::from(progress_width > 0);
                 let name_room = inner_width.saturating_sub(prefix_width + progress_width + gap);
@@ -95,10 +96,9 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
                     display_width(&display_name)
                 };
 
-                let mut spans = vec![
-                    Span::styled("  ".repeat(depth), theme.dim_style()),
-                    Span::styled(format!("{marker} "), theme.fold_style()),
-                ];
+                let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
+                spans.extend(guide_prefix(todo_list, path, theme));
+                spans.push(Span::styled(format!("{marker} "), theme.fold_style()));
                 if renaming {
                     if let Some(field) = rename_field {
                         spans.extend(editing_spans(field, name_style, theme));
@@ -141,13 +141,28 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
     draw_scrollbar(f, area, row_count, height, offset, theme);
 }
 
+/// Indentation for a section row, excluding the leading gutter.
+///
+/// Every level of depth contributes two cells. A level whose ancestor still has
+/// later siblings draws a vertical guide, so a branch stays visually connected
+/// to its parent; the last child of an ancestor leaves the cells blank.
+fn guide_prefix(todo_list: &TodoList, path: &[usize], theme: &Theme) -> Vec<Span<'static>> {
+    let depth = path.len().saturating_sub(1);
+    (0..depth)
+        .map(|level| {
+            let parent = (level > 0).then(|| path[..level].to_vec());
+            let last = path[level] + 1 >= child_count(todo_list, parent.as_ref());
+            let glyph = if last { " " } else { theme.glyphs.tree_guide };
+            Span::styled(format!("{glyph} "), theme.tree_guide())
+        })
+        .collect()
+}
+
 fn ghost_item(field: &TextField, depth: usize, width: usize, theme: &Theme) -> ListItem<'static> {
-    let mut spans = vec![
-        Span::styled("  ".repeat(depth), theme.dim_style()),
-        Span::raw("  "),
-    ];
+    let indent = depth * 2 + GUTTER + 2;
+    let mut spans = vec![Span::raw(" ".repeat(indent))];
     spans.extend(editing_spans(field, theme.text_style(), theme));
-    let used = depth * 2 + 2 + field.buf.chars().count() + 1;
+    let used = indent + field.buf.chars().count() + 1;
     spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
     ListItem::new(Line::from(spans))
 }

@@ -1,5 +1,5 @@
 ╭ Sections ───╮╭ Empty ────────────────────────────────╮
-│  Empty      ││  no tasks — press o to add one        │
+│   Empty     ││  no tasks — press o to add one        │
 │             ││                                       │
 │             ││                                       │
 │             ││                                       │

@@ -95,6 +95,21 @@ mod snapshots {
         (todo, app)
     }
 
+    /// Compare a rendered frame with its checked-in snapshot.
+    ///
+    /// Run `GRC_BLESS=1 cargo test` to rewrite the snapshots after an
+    /// intentional rendering change; the next compile picks up the new files.
+    fn assert_snapshot(name: &str, expected: &str, actual: String) {
+        if std::env::var_os("GRC_BLESS").is_some() {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/tui/render/snapshots")
+                .join(format!("{name}.txt"));
+            std::fs::write(path, &actual).expect("write snapshot");
+            return;
+        }
+        assert_eq!(actual, expected, "snapshot `{name}` changed");
+    }
+
     const NORMAL: &str = include_str!("snapshots/normal.txt");
     const EDIT: &str = include_str!("snapshots/edit.txt");
     const EDIT_INVALID_DUE: &str = include_str!("snapshots/edit_invalid_due.txt");
@@ -106,7 +121,7 @@ mod snapshots {
     #[test]
     fn normal_snapshot() {
         let (todo, app) = normal_state();
-        assert_eq!(render(72, 14, &todo, &app), NORMAL);
+        assert_snapshot("normal", NORMAL, render(72, 14, &todo, &app));
     }
 
     #[test]
@@ -120,7 +135,7 @@ mod snapshots {
             field: TextField::new("Ship release due:next fri"),
         });
         prepare(&mut app, &todo);
-        assert_eq!(render(72, 14, &todo, &app), EDIT);
+        assert_snapshot("edit", EDIT, render(72, 14, &todo, &app));
         assert!(EDIT.contains("│  → fri"));
     }
 
@@ -136,7 +151,11 @@ mod snapshots {
             field: TextField::new("nonsense"),
         });
         prepare(&mut app, &todo);
-        assert_eq!(render(72, 14, &todo, &app), EDIT_INVALID_DUE);
+        assert_snapshot(
+            "edit_invalid_due",
+            EDIT_INVALID_DUE,
+            render(72, 14, &todo, &app),
+        );
         assert!(EDIT_INVALID_DUE.contains("invalid — old date kept"));
     }
 
@@ -146,7 +165,7 @@ mod snapshots {
         app.mode = Mode::Filter;
         app.set_filter("bug".into());
         prepare(&mut app, &todo);
-        assert_eq!(render(72, 14, &todo, &app), FILTER);
+        assert_snapshot("filter", FILTER, render(72, 14, &todo, &app));
         assert!(FILTER.contains("/bug  1 match"));
     }
 
@@ -156,7 +175,7 @@ mod snapshots {
         app.mode = Mode::Help;
         app.viewport_height = 20;
         prepare(&mut app, &todo);
-        assert_eq!(render(80, 20, &todo, &app), HELP);
+        assert_snapshot("help", HELP, render(80, 20, &todo, &app));
         assert!(HELP.contains("Navigate"));
         assert!(HELP.contains("Edit"));
         // Dates and Misc are below the fold; the help module tests all groups.
@@ -168,14 +187,14 @@ mod snapshots {
         let mut app = AppState::new_with_today(1, TODAY);
         app.focus = Focus::Right;
         prepare(&mut app, &empty);
-        assert_eq!(render(56, 10, &empty, &app), EMPTY);
+        assert_snapshot("empty", EMPTY, render(56, 10, &empty, &app));
         assert!(EMPTY.contains("no tasks — press o to add one"));
     }
 
     #[test]
     fn narrow_snapshot_degrades_without_overlap() {
         let (todo, app) = normal_state();
-        assert_eq!(render(40, 10, &todo, &app), NARROW);
+        assert_snapshot("narrow", NARROW, render(40, 10, &todo, &app));
         assert!(NARROW.contains("today"));
     }
 

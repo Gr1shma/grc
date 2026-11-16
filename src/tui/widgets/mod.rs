@@ -4,9 +4,32 @@ pub mod hint;
 pub mod popup;
 pub mod status;
 
+use crate::tui::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
+use ratatui::widgets::{Block, BorderType, Borders};
+
+/// Border style used by every panel and dialog in the interface.
+pub const BORDER_TYPE: BorderType = BorderType::Rounded;
+
+/// Blank cells between a panel's border and its content.
+///
+/// Shared by both panels so their first columns line up and so a selection bar
+/// never touches the border.
+pub const GUTTER: usize = 1;
+
+/// A bordered panel with a themed title and focus-dependent border.
+///
+/// Centralising this keeps the rounded corners and title padding consistent
+/// between the section tree, the task list, and the help dialog.
+pub fn panel<'a>(theme: &Theme, title: &str, focused: bool) -> Block<'a> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BORDER_TYPE)
+        .title(Span::styled(format!(" {title} "), theme.title(focused)))
+        .border_style(theme.border(focused))
+}
 
 /// Number of terminal cells a string occupies in the common case.
 ///

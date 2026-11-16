@@ -214,16 +214,10 @@ fn handle_help_mouse(app: &mut AppState, area: Rect, kind: MouseEventKind, colum
     }
 }
 
-fn help_popup(area: Rect) -> Rect {
-    let width = percentage(area.width, HELP_POPUP_WIDTH_PERCENT);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(HELP_POPUP_HEIGHT)) / 2;
-    Rect {
-        x,
-        y,
-        width: width.min(area.width),
-        height: HELP_POPUP_HEIGHT.min(area.height),
-    }
+/// Geometry of the help overlay, shared with the renderer so mouse hit-testing
+/// can never disagree with what was drawn.
+pub(crate) fn help_popup(area: Rect) -> Rect {
+    widgets::popup::centered(area, HELP_POPUP_WIDTH_PERCENT, HELP_POPUP_HEIGHT)
 }
 
 fn handle_click(app: &mut AppState, todo_list: &TodoList, area: Rect, column: u16, row: u16) {
@@ -234,7 +228,7 @@ fn handle_click(app: &mut AppState, todo_list: &TodoList, area: Rect, column: u1
         return;
     }
 
-    let left_width = percentage(area.width, LEFT_PANEL_PERCENT);
+    let left_width = widgets::percentage(area.width, LEFT_PANEL_PERCENT);
     if column < left_width {
         app.focus = Focus::Left;
         if row_index < app.tree_items.len() {
@@ -287,18 +281,30 @@ fn scroll(app: &mut AppState, todo_list: &TodoList, delta: isize) {
     }
 }
 
-/// Percentage of a `u16` dimension without integer overflow.
-pub fn percentage(total: u16, percent: u16) -> u16 {
-    (u32::from(total) * u32::from(percent) / 100) as u16
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn percentage_does_not_overflow() {
-        assert_eq!(percentage(u16::MAX, 55), 36044);
-        assert_eq!(percentage(100, 27), 27);
+        assert_eq!(widgets::percentage(u16::MAX, 55), 36044);
+        assert_eq!(widgets::percentage(100, 27), 27);
+    }
+
+    #[test]
+    fn help_popup_matches_the_rendered_overlay() {
+        let area = Rect::new(0, 0, 80, 24);
+        let popup = help_popup(area);
+        assert_eq!(popup, render::help::overlay_area(area));
+        assert!(popup.width <= area.width && popup.height <= area.height);
+    }
+
+    #[test]
+    fn help_popup_degenerates_on_tiny_terminals() {
+        for size in [(0, 0), (1, 1), (10, 3)] {
+            let area = Rect::new(0, 0, size.0, size.1);
+            let popup = help_popup(area);
+            assert!(popup.width <= size.0 && popup.height <= size.1);
+        }
     }
 }

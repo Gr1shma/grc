@@ -3,16 +3,21 @@
 use crate::tui::state::AppState;
 use crate::tui::theme::Theme;
 use crate::tui::widgets::popup;
-use crate::tui::{HELP_POPUP_HEIGHT, HELP_POPUP_WIDTH_PERCENT};
+use crate::tui::{HELP_POPUP_HEIGHT, help_popup};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Paragraph};
 
+/// Area the help overlay occupies, derived from the terminal size.
+pub(crate) fn overlay_area(area: Rect) -> Rect {
+    help_popup(area)
+}
+
 /// Draw the help overlay. Scrolling is clamped only for display; input state
 /// owns the stored offset so rendering never mutates application state.
 pub fn draw_help_overlay(f: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
-    let popup_area = popup::centered(area, HELP_POPUP_WIDTH_PERCENT, HELP_POPUP_HEIGHT);
+    let popup_area = overlay_area(area);
     f.render_widget(Clear, popup_area);
     let content = help_content(theme);
     let visible = usize::from(popup_area.height.saturating_sub(2));
