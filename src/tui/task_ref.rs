@@ -130,3 +130,99 @@ pub fn get_task_from_ref_mut<'a>(
         .tasks
         .get_mut(task_ref.task_idx)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_str;
+
+    fn sample() -> TodoList {
+        parse_str(
+            "# work\n- [ ] Task A\n- [ ] Task B\n## backend\n- [ ] Fix API\n### api\n- [ ] Fix endpoint\n# personal\n- [ ] Buy milk\n",
+        )
+    }
+
+    #[test]
+    fn top_level_flattens_subtree() {
+        let refs = get_task_refs(&sample(), &vec![0]);
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0].node, vec![0]);
+        assert_eq!(refs[0].sub_name, None);
+        assert_eq!(refs[2].node, vec![0, 0]);
+        assert_eq!(refs[2].sub_name.as_deref(), Some("backend"));
+        assert_eq!(refs[3].node, vec![0, 0, 0]);
+        assert_eq!(refs[3].sub_name.as_deref(), Some("backend › api"));
+    }
+
+    #[test]
+    fn nested_section_shows_direct_tasks_only() {
+        let refs = get_task_refs(&sample(), &vec![0, 0]);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].node, vec![0, 0]);
+        assert_eq!(refs[0].sub_name, None);
+    }
+
+    #[test]
+    fn missing_section_has_no_rows() {
+        assert!(get_task_refs(&sample(), &vec![99]).is_empty());
+        assert!(get_task_refs(&TodoList::default(), &vec![0]).is_empty());
+    }
+
+    #[test]
+    fn filter_by_task_text() {
+        let refs = get_task_refs_filtered(&sample(), &vec![0], "milk");
+        assert!(refs.is_empty());
+        let refs = get_task_refs_filtered(&sample(), &vec![1], "milk");
+        assert_eq!(refs.len(), 1);
+    }
+
+    #[test]
+    fn filter_by_breadcrumb() {
+        let refs = get_task_refs_filtered(&sample(), &vec![0], "backend");
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].node, vec![0, 0]);
+        assert_eq!(refs[1].node, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn matching_section_keeps_all_tasks() {
+        let refs = get_task_refs_filtered(&sample(), &vec![0], "work");
+        assert_eq!(refs.len(), 4);
+        let refs = get_task_refs_filtered(&sample(), &vec![0, 0], "backend");
+        assert_eq!(refs.len(), 1);
+    }
+
+    #[test]
+    fn task_accessors() {
+        let mut list = sample();
+        let task_ref = TaskRef {
+            node: vec![0, 0, 0],
+            task_idx: 0,
+            sub_name: Some("api".into()),
+        };
+        assert_eq!(
+            get_task_from_ref(&list, &task_ref).unwrap().text,
+            "Fix endpoint"
+        );
+
+        get_task_from_ref_mut(&mut list, &task_ref).unwrap().text = "Updated".into();
+        assert_eq!(
+            get_node(&list, &[0, 0, 0]).unwrap().tasks[0].text,
+            "Updated"
+        );
+    }
+
+    #[test]
+    fn breadcrumbs() {
+        let list = sample();
+        assert_eq!(node_breadcrumb(&list, &vec![0]), None);
+        assert_eq!(
+            node_breadcrumb(&list, &vec![0, 0, 0]).as_deref(),
+            Some("backend › api")
+        );
+        assert_eq!(
+            full_breadcrumb(&list, &vec![0, 0, 0]),
+            "work › backend › api"
+        );
+    }
+}

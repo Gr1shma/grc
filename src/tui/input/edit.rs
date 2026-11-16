@@ -266,3 +266,313 @@ fn commit_section(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_str;
+    use crate::task::TodoList;
+    use crate::tui::state::{Mode, TextField};
+    use crate::tui::task_ref::TaskRef;
+    use crate::tui::tree::{build_tree_items, selected_node};
+    use chrono::NaiveDate;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn setup(content: &str) -> (NamedTempFile, AppState, TodoList) {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+        let list = parse_str(content);
+        let mut app = AppState::new(list.sections.len());
+        app.tree_items = build_tree_items(&list, &app.mode);
+        (file, app, list)
+    }
+
+    fn task_input(
+        node: Vec<usize>,
+        editing_idx: Option<usize>,
+        insert_idx: Option<usize>,
+        text: &str,
+    ) -> TaskInput {
+        TaskInput {
+            editing_idx,
+            insert_idx,
+            above: false,
+            node,
+            field: TextField::new(text),
+        }
+    }
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    #[test]
+    fn esc_cancels_each_input_mode_without_saving() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Task\n");
+
+        app.mode = Mode::InputTask(task_input(vec![0], None, None, "draft"));
+        handle_input_task(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+
+        app.mode = Mode::InputDue(DueInput {
+            target: TaskRef {
+                node: vec![0],
+                task_idx: 0,
+                sub_name: None,
+            },
+            field: TextField::new("2025-01-01"),
+        });
+        handle_input_due(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+
+        app.mode = Mode::InputSection(SectionInput {
+            node: None,
+            parent: None,
+            insert_idx: None,
+            level: 1,
+            field: TextField::new("draft"),
+        });
+        handle_input_section(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(app.mode, Mode::Normal);
+
+        assert_eq!(list, parse_str("# main\n- [ ] Task\n"));
+    }
+
+    #[test]
+    fn text_editing_is_shared_and_unicode_safe() {
+        let (file, mut app, mut list) = setup("# main\n");
+        app.mode = Mode::InputTask(task_input(vec![0], None, None, "aé"));
+        handle_input_task(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Char('日'),
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        handle_input_task(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+
+        match app.mode {
+            Mode::InputTask(ref input) => assert_eq!(input.field.buf, "aé"),
+            ref other => panic!("expected task input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enter_adds_task_with_inline_due() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+        app.mode = Mode::InputTask(task_input(
+            vec![0],
+            None,
+            Some(1),
+            "New task due:2025-06-15",
+        ));
+
+        handle_input_task(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].tasks.len(), 2);
+        assert_eq!(parsed.sections[0].tasks[1].text, "New task");
+        assert_eq!(parsed.sections[0].tasks[1].due, Some(date(2025, 6, 15)));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.focus, Focus::Right);
+    }
+
+    #[test]
+    fn enter_edits_existing_task_and_can_set_due() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Old\n");
+        app.mode = Mode::InputTask(task_input(vec![0], Some(0), None, "Updated due:2025-06-15"));
+
+        handle_input_task(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].tasks[0].text, "Updated");
+        assert_eq!(parsed.sections[0].tasks[0].due, Some(date(2025, 6, 15)));
+    }
+
+    #[test]
+    fn empty_task_buffer_does_not_add() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Existing\n");
+        app.mode = Mode::InputTask(task_input(vec![0], None, None, "   "));
+        handle_input_task(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(list.sections[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn due_enter_sets_clears_and_invalid_clears() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Task due:2025-01-01\n");
+        let target = TaskRef {
+            node: vec![0],
+            task_idx: 0,
+            sub_name: None,
+        };
+
+        app.mode = Mode::InputDue(DueInput {
+            target: target.clone(),
+            field: TextField::new("2025-06-15"),
+        });
+        handle_input_due(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(list.sections[0].tasks[0].due, Some(date(2025, 6, 15)));
+
+        app.mode = Mode::InputDue(DueInput {
+            target: target.clone(),
+            field: TextField::new(""),
+        });
+        handle_input_due(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(list.sections[0].tasks[0].due, None);
+
+        app.mode = Mode::InputDue(DueInput {
+            target,
+            field: TextField::new("not-a-date"),
+        });
+        handle_input_due(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(list.sections[0].tasks[0].due, None);
+    }
+
+    #[test]
+    fn section_enter_creates_child_at_requested_level() {
+        let (file, mut app, mut list) = setup("# main\n");
+        app.left_state.select(Some(0));
+        app.mode = Mode::InputSection(SectionInput {
+            node: None,
+            parent: Some(vec![0]),
+            insert_idx: Some(0),
+            level: 2,
+            field: TextField::new("child"),
+        });
+        handle_input_section(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].children[0].name, "child");
+        assert_eq!(parsed.sections[0].children[0].level, 2);
+        assert_eq!(selected_node(&app), Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn section_enter_renames_existing() {
+        let (file, mut app, mut list) = setup("# old\n");
+        app.left_state.select(Some(0));
+        app.mode = Mode::InputSection(SectionInput {
+            node: Some(vec![0]),
+            parent: None,
+            insert_idx: None,
+            level: 1,
+            field: TextField::new("new"),
+        });
+        handle_input_section(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].name, "new");
+        assert_eq!(selected_node(&app), Some(vec![0]));
+    }
+
+    #[test]
+    fn empty_section_name_does_not_create_or_rename() {
+        let (file, mut app, mut list) = setup("# main\n");
+        app.mode = Mode::InputSection(SectionInput {
+            node: Some(vec![0]),
+            parent: None,
+            insert_idx: None,
+            level: 1,
+            field: TextField::new("   "),
+        });
+        handle_input_section(
+            &mut app,
+            &mut list,
+            file.path(),
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )
+        .unwrap();
+        assert_eq!(list.sections[0].name, "main");
+        assert_eq!(list.sections.len(), 1);
+    }
+}

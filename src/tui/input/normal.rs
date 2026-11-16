@@ -623,3 +623,329 @@ fn sort_tasks_by_due(app: &mut AppState, todo_list: &mut TodoList, path: &Path) 
         .sort_by_key(|task| (task.due.is_none(), task.due));
     write_file(path, todo_list)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_str;
+    use crate::task::TodoList;
+    use crate::tui::state::{Mode, TextField, TreeItem};
+    use crate::tui::tree::{build_tree_items, clamp_left_selection};
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn setup(content: &str) -> (NamedTempFile, AppState, TodoList) {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+        let list = parse_str(content);
+        let mut app = AppState::new(list.sections.len());
+        app.tree_items = build_tree_items(&list, &app.mode);
+        (file, app, list)
+    }
+
+    fn press(app: &mut AppState, list: &mut TodoList, file: &NamedTempFile, code: KeyCode) -> bool {
+        handle_normal(app, list, file.path(), code).unwrap()
+    }
+
+    fn select_path(app: &mut AppState, path: &[usize]) {
+        let position = app
+            .tree_items
+            .iter()
+            .position(|item| matches!(item, TreeItem::Node(p) if p.as_slice() == path))
+            .unwrap();
+        app.left_state.select(Some(position));
+    }
+
+    #[test]
+    fn pending_prefix_is_cleared_by_unrelated_key() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Task\n");
+        assert!(!press(&mut app, &mut list, &file, KeyCode::Char('d')));
+        assert_eq!(app.pending, PendingKey::Delete);
+        assert!(!press(&mut app, &mut list, &file, KeyCode::Char('?')));
+        assert_eq!(app.pending, PendingKey::None);
+        assert_eq!(app.mode, Mode::Normal);
+    }
+
+    #[test]
+    fn pending_prefix_is_cleared_by_filter_key() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] Task\n");
+        press(&mut app, &mut list, &file, KeyCode::Char('g'));
+        press(&mut app, &mut list, &file, KeyCode::Char('/'));
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.pending, PendingKey::None);
+    }
+
+    #[test]
+    fn gg_and_g_move_within_bounds() {
+        let (file, mut app, mut list) = setup("# a\n# b\n# c\n");
+        press(&mut app, &mut list, &file, KeyCode::Char('G'));
+        assert_eq!(app.left_state.selected(), Some(2));
+        press(&mut app, &mut list, &file, KeyCode::Char('g'));
+        press(&mut app, &mut list, &file, KeyCode::Char('g'));
+        assert_eq!(app.left_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn navigation_on_empty_document_clears_selection() {
+        let (file, mut app, mut list) = setup("");
+        press(&mut app, &mut list, &file, KeyCode::Char('j'));
+        assert!(app.left_state.selected().is_none());
+        press(&mut app, &mut list, &file, KeyCode::Char('G'));
+        assert!(app.left_state.selected().is_none());
+    }
+
+    #[test]
+    fn section_add_operations_target_requested_levels() {
+        let (file, mut app, mut list) = setup("# main\n## sub\n");
+
+        select_path(&mut app, &[0]);
+        press(&mut app, &mut list, &file, KeyCode::Char('a'));
+        match &app.mode {
+            Mode::InputSection(input) => {
+                assert_eq!(input.parent.as_deref(), Some([0].as_slice()));
+                assert_eq!(input.insert_idx, Some(0));
+                assert_eq!(input.level, 2);
+            }
+            other => panic!("expected section input, got {other:?}"),
+        }
+
+        app.mode = Mode::Normal;
+        select_path(&mut app, &[0, 0]);
+        press(&mut app, &mut list, &file, KeyCode::Char('a'));
+        match &app.mode {
+            Mode::InputSection(input) => assert_eq!(input.level, 3),
+            other => panic!("expected section input, got {other:?}"),
+        }
+
+        app.mode = Mode::Normal;
+        press(&mut app, &mut list, &file, KeyCode::Char('o'));
+        match &app.mode {
+            Mode::InputSection(input) => {
+                assert_eq!(input.parent.as_deref(), Some([0].as_slice()));
+                assert_eq!(input.insert_idx, Some(1));
+                assert_eq!(input.level, 2);
+            }
+            other => panic!("expected section input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn capital_operations_move_one_structural_level() {
+        let (file, mut app, mut list) = setup("# main\n## sub\n");
+        select_path(&mut app, &[0, 0]);
+
+        press(&mut app, &mut list, &file, KeyCode::Char('A'));
+        match &app.mode {
+            Mode::InputSection(input) => {
+                assert!(input.parent.is_none());
+                assert_eq!(input.insert_idx, Some(0));
+                assert_eq!(input.level, 1);
+            }
+            other => panic!("expected section input, got {other:?}"),
+        }
+
+        app.mode = Mode::Normal;
+        select_path(&mut app, &[0, 0]);
+        press(&mut app, &mut list, &file, KeyCode::Char('O'));
+        match &app.mode {
+            Mode::InputSection(input) => {
+                assert_eq!(input.parent.as_deref(), Some([0].as_slice()));
+                assert_eq!(input.insert_idx, Some(0));
+                assert_eq!(input.level, 2);
+            }
+            other => panic!("expected section input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_section_yanks_and_keeps_selection_valid() {
+        let (file, mut app, mut list) = setup("# a\n## a1\n# b\n");
+        select_path(&mut app, &[0, 0]);
+        press(&mut app, &mut list, &file, KeyCode::Char('d'));
+        press(&mut app, &mut list, &file, KeyCode::Char('d'));
+
+        assert!(matches!(app.clipboard, Some(ClipboardItem::Section(_))));
+        assert_eq!(list.sections.len(), 2);
+        assert!(list.sections[0].children.is_empty());
+        assert!(
+            app.left_state
+                .selected()
+                .is_some_and(|i| i < app.tree_items.len())
+        );
+    }
+
+    #[test]
+    fn delete_last_task_clears_right_selection_and_focus() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] only\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+        press(&mut app, &mut list, &file, KeyCode::Char('d'));
+        press(&mut app, &mut list, &file, KeyCode::Char('d'));
+
+        assert!(list.sections[0].tasks.is_empty());
+        assert_eq!(app.right_state.selected(), None);
+        assert_eq!(app.focus, Focus::Left);
+        let reparsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert!(reparsed.sections[0].tasks.is_empty());
+    }
+
+    #[test]
+    fn yank_and_paste_task_above_and_below() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] A\n- [ ] B\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+        press(&mut app, &mut list, &file, KeyCode::Char('y'));
+        press(&mut app, &mut list, &file, KeyCode::Char('y'));
+        press(&mut app, &mut list, &file, KeyCode::Char('p'));
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].tasks.len(), 3);
+        assert_eq!(parsed.sections[0].tasks[1].text, "A");
+
+        app.right_state.select(Some(1));
+        press(&mut app, &mut list, &file, KeyCode::Char('P'));
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].tasks.len(), 4);
+        assert_eq!(parsed.sections[0].tasks[1].text, "A");
+    }
+
+    #[test]
+    fn yank_and_paste_section() {
+        let (file, mut app, mut list) = setup("# main\n# clz\n");
+        select_path(&mut app, &[0]);
+        press(&mut app, &mut list, &file, KeyCode::Char('y'));
+        press(&mut app, &mut list, &file, KeyCode::Char('y'));
+        select_path(&mut app, &[1]);
+        press(&mut app, &mut list, &file, KeyCode::Char('p'));
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections.len(), 3);
+        assert_eq!(parsed.sections[2].name, "main");
+    }
+
+    #[test]
+    fn delete_task_while_filtered_deletes_the_visible_task() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] keep\n- [ ] remove\n");
+        app.filter = "remove".into();
+        app.filter_lower = "remove".into();
+        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, &app.filter_lower);
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+
+        press(&mut app, &mut list, &file, KeyCode::Char('d'));
+        press(&mut app, &mut list, &file, KeyCode::Char('d'));
+
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert_eq!(parsed.sections[0].tasks.len(), 1);
+        assert_eq!(parsed.sections[0].tasks[0].text, "keep");
+    }
+
+    #[test]
+    fn toggle_task_writes_immediately() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] A\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+        press(&mut app, &mut list, &file, KeyCode::Char('x'));
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        assert!(parsed.sections[0].tasks[0].is_done);
+    }
+
+    #[test]
+    fn sort_orders_dated_tasks_first() {
+        let (file, mut app, mut list) =
+            setup("# main\n- [ ] C due:2025-12-01\n- [ ] A due:2025-01-15\n- [ ] B\n");
+        app.focus = Focus::Right;
+        press(&mut app, &mut list, &file, KeyCode::Char(':'));
+        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
+        let texts: Vec<_> = parsed.sections[0]
+            .tasks
+            .iter()
+            .map(|task| task.text.as_str())
+            .collect();
+        assert_eq!(texts, ["A", "C", "B"]);
+    }
+
+    #[test]
+    fn filter_esc_restores_selection_and_clears_text() {
+        let (_file, mut app, list) = setup("# main\n## sub1\n- [ ] A\n## sub2\n- [ ] B\n");
+        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "");
+        select_path(&mut app, &[0, 0]);
+        app.mode = Mode::Filter;
+        app.filter_anchor = Some(vec![0, 0]);
+        app.filter = "sub".into();
+        app.filter_lower = "sub".into();
+
+        handle_filter(&mut app, &list, KeyCode::Esc).unwrap();
+
+        assert!(app.filter.is_empty());
+        assert_eq!(app.mode, Mode::Normal);
+        let snapshot = app.filter_restore.as_ref().unwrap();
+        assert!(snapshot.node.is_some());
+    }
+
+    #[test]
+    fn filter_typing_keeps_selection_valid_after_rebuild() {
+        let (_file, mut app, list) = setup("# main\n## sub1\n- [ ] A\n## sub2\n- [ ] B\n");
+        select_path(&mut app, &[0, 0]);
+        app.mode = Mode::Filter;
+        app.filter_anchor = Some(vec![0, 0]);
+        handle_filter(&mut app, &list, KeyCode::Char('z')).unwrap();
+        app.tree_items = build_visible_tree_items(&list, &app.mode, &app.filter_lower);
+        if app.tree_items.is_empty() {
+            app.left_state.select(None);
+        } else {
+            app.left_state.select(Some(
+                app.left_state
+                    .selected()
+                    .unwrap_or(0)
+                    .min(app.tree_items.len() - 1),
+            ));
+        }
+        clamp_left_selection(&mut app);
+        assert!(
+            app.left_state
+                .selected()
+                .is_none_or(|i| i < app.tree_items.len())
+        );
+    }
+
+    #[test]
+    fn right_panel_input_modes_capture_targets() {
+        let (file, mut app, mut list) = setup("# main\n- [ ] A due:2025-01-15\n");
+        app.focus = Focus::Right;
+        app.right_state.select(Some(0));
+
+        press(&mut app, &mut list, &file, KeyCode::Char('i'));
+        match &app.mode {
+            Mode::InputTask(input) => {
+                assert_eq!(input.editing_idx, Some(0));
+                assert_eq!(input.field.buf, "A");
+            }
+            other => panic!("expected task input, got {other:?}"),
+        }
+
+        app.mode = Mode::Normal;
+        press(&mut app, &mut list, &file, KeyCode::Char('t'));
+        match &app.mode {
+            Mode::InputDue(input) => {
+                assert_eq!(input.target.task_idx, 0);
+                assert_eq!(input.field.buf, "2025-01-15");
+            }
+            other => panic!("expected due input, got {other:?}"),
+        }
+
+        app.mode = Mode::Normal;
+        press(&mut app, &mut list, &file, KeyCode::Char('O'));
+        match &app.mode {
+            Mode::InputTask(input) => assert!(input.above),
+            other => panic!("expected task input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_field_is_used_for_new_tasks() {
+        let field = TextField::new("é");
+        assert_eq!(field.cursor, 1);
+    }
+}

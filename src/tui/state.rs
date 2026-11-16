@@ -227,3 +227,41 @@ impl AppState {
         self.filter = filter;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_with_zero_sections_has_no_left_selection() {
+        let app = AppState::new(0);
+        assert!(app.left_state.selected().is_none());
+    }
+
+    #[test]
+    fn new_with_sections_selects_first() {
+        let app = AppState::new(3);
+        assert_eq!(app.left_state.selected(), Some(0));
+        assert_eq!(app.focus, Focus::Left);
+        assert_eq!(app.mode, Mode::Normal);
+        assert_eq!(app.pending, PendingKey::None);
+    }
+
+    #[test]
+    fn text_field_cursor_is_char_based() {
+        let field = TextField::new("héllo日本");
+        assert_eq!(field.cursor, 7);
+        assert_eq!(field.buf.chars().count(), 7);
+    }
+
+    #[test]
+    fn set_filter_keeps_lowercase_copy() {
+        let mut app = AppState::new(1);
+        app.set_filter("Mixed Case".into());
+        assert_eq!(app.filter, "Mixed Case");
+        assert_eq!(app.filter_lower, "mixed case");
+        app.clear_filter();
+        assert!(app.filter.is_empty());
+        assert!(app.filter_lower.is_empty());
+    }
+}

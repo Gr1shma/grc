@@ -297,3 +297,299 @@ impl MarkdownWriter {
         self.lines.push(line);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::get_node;
+    use chrono::NaiveDate;
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    fn roundtrip(input: &str) -> (TodoList, String) {
+        let list = parse_str(input);
+        let output = to_markdown(&list);
+        (list, output)
+    }
+
+    #[test]
+    fn parses_single_section_with_tasks() {
+        let list = parse_str("# main\n- [ ] Buy milk\n- [x] Walk dog\n");
+        assert_eq!(list.sections.len(), 1);
+        assert_eq!(list.sections[0].name, "main");
+        assert_eq!(list.sections[0].level, 1);
+        assert_eq!(list.sections[0].tasks.len(), 2);
+        assert!(!list.sections[0].tasks[0].is_done);
+        assert_eq!(list.sections[0].tasks[0].text, "Buy milk");
+        assert!(list.sections[0].tasks[1].is_done);
+    }
+
+    #[test]
+    fn parses_uppercase_done_marker() {
+        let list = parse_str("# sec\n- [X] Done task\n");
+        assert!(list.sections[0].tasks[0].is_done);
+    }
+
+    #[test]
+    fn malformed_checkboxes_are_prose() {
+        let list = parse_str("# sec\n- [ ]not a task\n- [x]nope\n- [~] no\n");
+        assert!(list.sections[0].tasks.is_empty());
+        assert_eq!(list.trailing_raw.len(), 3);
+    }
+
+    #[test]
+    fn parses_due_date_and_strips_token() {
+        let list = parse_str("# sec\n- [ ] Submit report due:2025-01-15\n");
+        let task = &list.sections[0].tasks[0];
+        assert_eq!(task.text, "Submit report");
+        assert_eq!(task.due, Some(date(2025, 1, 15)));
+    }
+
+    #[test]
+    fn due_in_middle_of_text_keeps_spacing() {
+        let list = parse_str("# sec\n- [ ] Submit due:2025-01-15 report\n");
+        let task = &list.sections[0].tasks[0];
+        assert_eq!(task.text, "Submit report");
+        assert_eq!(task.due, Some(date(2025, 1, 15)));
+    }
+
+    #[test]
+    fn due_token_is_not_eaten_inside_words_or_urls() {
+        let list =
+            parse_str("# sec\n- [ ] overdue:2025-01-01\n- [ ] https://example.com/due:today\n");
+        assert_eq!(list.sections[0].tasks[0].text, "overdue:2025-01-01");
+        assert_eq!(list.sections[0].tasks[0].due, None);
+        assert_eq!(
+            list.sections[0].tasks[1].text,
+            "https://example.com/due:today"
+        );
+        assert_eq!(list.sections[0].tasks[1].due, None);
+    }
+
+    #[test]
+    fn parsed_unknown_lines_are_kept_verbatim() {
+        let input = "\
+Intro prose
+
+<!-- a comment -->
+# work
+
+Some notes
+- [ ] Task A
+
+A paragraph after task A
+## backend
+
+- [ ] Task B
+Trailing text
+";
+        let (list, output) = roundtrip(input);
+        assert_eq!(output, input);
+        assert_eq!(list.sections[0].name, "work");
+        assert_eq!(list.sections[0].tasks[0].text, "Task A");
+        assert_eq!(list.sections[0].children[0].name, "backend");
+    }
+
+    #[test]
+    fn blank_lines_are_preserved() {
+        let input = "# a\n\n\n\n- [ ] t\n\n\n# b\n";
+        let (_, output) = roundtrip(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn heading_levels_are_preserved() {
+        let input = "# top\n### skipped\n#### deeper\n## sibling\n";
+        let (list, output) = roundtrip(input);
+        assert_eq!(output, input);
+        assert_eq!(list.sections[0].children[0].level, 3);
+        assert_eq!(list.sections[0].children[0].children[0].level, 4);
+        assert_eq!(list.sections[0].children[1].level, 2);
+    }
+
+    #[test]
+    fn nested_subsections_attach_to_correct_parents() {
+        let list =
+            parse_str("# work\n- [ ] Top\n## backend\n- [ ] Fix API\n## frontend\n- [x] Style\n");
+        assert_eq!(list.sections.len(), 1);
+        assert_eq!(list.sections[0].tasks.len(), 1);
+        assert_eq!(list.sections[0].children.len(), 2);
+        assert_eq!(list.sections[0].children[0].name, "backend");
+        assert_eq!(list.sections[0].children[1].name, "frontend");
+        assert!(list.sections[0].children[1].tasks[0].is_done);
+    }
+
+    #[test]
+    fn multiple_top_level_sections() {
+        let list = parse_str("# work\n- [ ] A\n# personal\n- [ ] B\n");
+        assert_eq!(list.sections.len(), 2);
+        assert_eq!(list.sections[0].name, "work");
+        assert_eq!(list.sections[1].name, "personal");
+    }
+
+    #[test]
+    fn empty_file_is_empty_list() {
+        let list = parse_str("");
+        assert!(list.sections.is_empty());
+        assert!(list.unsectioned_tasks.is_empty());
+        assert_eq!(to_markdown(&list), "");
+    }
+
+    #[test]
+    fn headings_only_are_preserved() {
+        let input = "# empty\n## sub\n";
+        let (list, output) = roundtrip(input);
+        assert_eq!(output, input);
+        assert!(list.sections[0].tasks.is_empty());
+        assert_eq!(list.sections[0].children.len(), 1);
+    }
+
+    #[test]
+    fn skipped_heading_levels_become_nested() {
+        let list = parse_str("# top\n### skip\n- [ ] only\n");
+        assert_eq!(list.sections[0].children[0].name, "skip");
+        assert_eq!(list.sections[0].children[0].level, 3);
+        assert_eq!(list.sections[0].children[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn deep_heading_hierarchy() {
+        let list = parse_str("# a\n## b\n### c\n#### d\n- [ ] deep\n");
+        let d = get_node(&list, &[0, 0, 0, 0]).unwrap();
+        assert_eq!(d.name, "d");
+        assert_eq!(d.tasks[0].text, "deep");
+    }
+
+    #[test]
+    fn tasks_before_first_heading_are_preserved_but_unsectioned() {
+        let input = "pre\n- [ ] Orphan\n# Header\n- [ ] Header task\n";
+        let (list, output) = roundtrip(input);
+        assert_eq!(output, input);
+        assert_eq!(list.unsectioned_tasks.len(), 1);
+        assert_eq!(list.unsectioned_tasks[0].text, "Orphan");
+        assert_eq!(list.sections[0].tasks.len(), 1);
+    }
+
+    #[test]
+    fn prose_only_file_roundtrips() {
+        let input = "Just some notes.\n\n- not a task\n";
+        let (list, output) = roundtrip(input);
+        assert_eq!(output, input);
+        assert!(list.sections.is_empty());
+        assert_eq!(list.trailing_raw.len(), 3);
+    }
+
+    #[test]
+    fn crlf_is_preserved() {
+        let input = "# sec\r\n\r\n- [ ] Task\r\n";
+        let (list, output) = roundtrip(input);
+        assert_eq!(list.line_ending, LineEnding::Crlf);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn missing_final_newline_is_preserved() {
+        let input = "# sec\n- [ ] Task";
+        let (list, output) = roundtrip(input);
+        assert!(!list.final_newline);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn very_long_lines_survive() {
+        let long = "x".repeat(100_000);
+        let input = format!("# sec\n- [ ] {long}\n");
+        let (list, output) = roundtrip(&input);
+        assert_eq!(output, input);
+        assert_eq!(list.sections[0].tasks[0].text.len(), 100_000);
+    }
+
+    #[test]
+    fn write_read_write_preserves_model_and_bytes() {
+        let input = "# Section 1\n\n- [ ] Task 1\n- [x] Task 2 due:2025-10-15\n\n## Sub 1\n\n- [ ] Subtask\n";
+        let first = parse_str(input);
+        let first_output = to_markdown(&first);
+        assert_eq!(first_output, input);
+
+        let second = parse_str(&first_output);
+        assert_eq!(first, second);
+        assert_eq!(to_markdown(&second), first_output);
+    }
+
+    #[test]
+    fn programmatic_document_gets_canonical_spacing() {
+        let mut list = TodoList::default();
+        let mut section = Section::new("Section 1");
+        section.tasks.push(Task::new("Task 1"));
+        let mut child = Section::new("Subsection 1");
+        child.tasks.push(Task::new("Task 2"));
+        section.children.push(child);
+        list.sections.push(section);
+
+        assert_eq!(
+            to_markdown(&list),
+            "# Section 1\n\n- [ ] Task 1\n\n## Subsection 1\n\n- [ ] Task 2\n"
+        );
+    }
+
+    #[test]
+    fn programmatic_due_and_done_markers() {
+        let mut list = TodoList::default();
+        let mut section = Section::new("s");
+        let mut done = Task::new("b");
+        done.is_done = true;
+        let mut due = Task::new("deadline");
+        due.due = Some(date(2025, 12, 1));
+        section.tasks.extend([Task::new("a"), done, due]);
+        list.sections.push(section);
+
+        let markdown = to_markdown(&list);
+        assert!(markdown.contains("- [ ] a"));
+        assert!(markdown.contains("- [x] b"));
+        assert!(markdown.contains("- [ ] deadline due:2025-12-01"));
+    }
+
+    #[test]
+    fn file_io_roundtrip_and_missing_file_error() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("todo.md");
+        let input = "# sec\n\n- [ ] Task\n";
+        fs::write(&path, input).unwrap();
+
+        let list = parse_file(&path).unwrap();
+        write_file(&path, &list).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
+
+        let missing = directory.path().join("missing.md");
+        assert!(parse_file(&missing).is_err());
+    }
+
+    #[test]
+    fn file_write_preserves_crlf_and_missing_final_newline() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("todo.md");
+        let input = "# sec\r\n\r\n- [ ] Task";
+        fs::write(&path, input).unwrap();
+
+        let list = parse_file(&path).unwrap();
+        write_file(&path, &list).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), input);
+    }
+
+    #[test]
+    fn temp_file_is_removed_on_success() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("todo.md");
+        let list = TodoList::default();
+        write_file(&path, &list).unwrap();
+        let leftovers = fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".grc_"))
+            .count();
+        assert_eq!(leftovers, 0);
+    }
+}

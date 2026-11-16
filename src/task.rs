@@ -217,3 +217,157 @@ pub fn child_count(list: &TodoList, path: Option<&NodePath>) -> usize {
 pub fn task_count(list: &TodoList, path: &NodePath) -> usize {
     get_node(list, path).map_or(0, |section| section.tasks.len())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(text: &str) -> Task {
+        Task::new(text)
+    }
+
+    fn sample() -> TodoList {
+        TodoList {
+            sections: vec![
+                Section {
+                    name: "work".into(),
+                    level: 1,
+                    tasks: vec![task("A"), task("B")],
+                    children: vec![Section {
+                        name: "backend".into(),
+                        level: 2,
+                        tasks: vec![task("C")],
+                        children: vec![Section {
+                            name: "api".into(),
+                            level: 3,
+                            tasks: vec![task("D")],
+                            children: Vec::new(),
+                            leading_raw: Some(Vec::new()),
+                        }],
+                        leading_raw: Some(Vec::new()),
+                    }],
+                    leading_raw: Some(Vec::new()),
+                },
+                Section {
+                    name: "personal".into(),
+                    level: 1,
+                    tasks: vec![task("Milk")],
+                    children: Vec::new(),
+                    leading_raw: Some(vec![String::new()]),
+                },
+            ],
+            ..TodoList::default()
+        }
+    }
+
+    #[test]
+    fn task_creation() {
+        let task = Task::new("Buy milk");
+        assert_eq!(task.text, "Buy milk");
+        assert!(!task.is_done);
+        assert!(task.due.is_none());
+        assert!(task.leading_raw.is_none());
+    }
+
+    #[test]
+    fn section_defaults() {
+        let section = Section::new("work");
+        assert_eq!(section.name, "work");
+        assert_eq!(section.level, 1);
+        assert!(section.tasks.is_empty());
+        assert!(section.children.is_empty());
+        assert!(section.leading_raw.is_none());
+    }
+
+    #[test]
+    fn counts_include_descendants() {
+        let list = sample();
+        assert_eq!(list.sections[0].count_tasks(), 4);
+        assert_eq!(list.sections[1].count_tasks(), 1);
+    }
+
+    #[test]
+    fn node_lookup() {
+        let mut list = sample();
+        assert_eq!(get_node(&list, &[0]).map(|s| s.name.as_str()), Some("work"));
+        assert_eq!(
+            get_node(&list, &[0, 0, 0]).map(|s| s.name.as_str()),
+            Some("api")
+        );
+        assert!(get_node(&list, &[99]).is_none());
+        assert!(get_node(&list, &[]).is_none());
+
+        get_node_mut(&mut list, &[0, 0])
+            .unwrap()
+            .tasks
+            .push(task("New"));
+        assert_eq!(list.sections[0].children[0].tasks.len(), 2);
+    }
+
+    #[test]
+    fn insert_top_level_forces_level() {
+        let mut list = sample();
+        let path = insert_section(&mut list, None, 1, Section::new("new"), 1).unwrap();
+        assert_eq!(path, vec![1]);
+        assert_eq!(list.sections[1].name, "new");
+        assert_eq!(list.sections[1].level, 1);
+    }
+
+    #[test]
+    fn insert_nested_child_uses_requested_level() {
+        let mut list = sample();
+        let path = insert_section(&mut list, Some(&vec![0]), 0, Section::new("child"), 2).unwrap();
+        assert_eq!(path, vec![0, 0]);
+        assert_eq!(list.sections[0].children[0].level, 2);
+    }
+
+    #[test]
+    fn insert_preserves_relative_level_skips() {
+        let mut child = Section::with_level("skip", 3);
+        child.children.push(Section::with_level("deep", 5));
+        let mut list = TodoList {
+            sections: vec![Section::with_level("a", 1)],
+            ..TodoList::default()
+        };
+
+        let path = insert_section(&mut list, Some(&vec![0]), 0, child, 2).unwrap();
+
+        let pasted = get_node(&list, &path).unwrap();
+        assert_eq!(pasted.level, 2);
+        assert_eq!(pasted.children[0].level, 4);
+    }
+
+    #[test]
+    fn remove_section_at_each_depth() {
+        let mut list = sample();
+        assert_eq!(remove_section(&mut list, &[0, 0, 0]).unwrap().name, "api");
+        assert!(list.sections[0].children[0].children.is_empty());
+
+        assert_eq!(remove_section(&mut list, &[0, 0]).unwrap().name, "backend");
+        assert!(list.sections[0].children.is_empty());
+
+        assert_eq!(remove_section(&mut list, &[1]).unwrap().name, "personal");
+        assert_eq!(list.sections.len(), 1);
+        assert!(remove_section(&mut list, &[]).is_none());
+        assert!(remove_section(&mut list, &[99]).is_none());
+    }
+
+    #[test]
+    fn child_and_task_counts() {
+        let list = sample();
+        assert_eq!(child_count(&list, None), 2);
+        assert_eq!(child_count(&list, Some(&vec![0])), 1);
+        assert_eq!(child_count(&list, Some(&vec![0, 0])), 1);
+        assert_eq!(task_count(&list, &vec![0]), 2);
+        assert_eq!(task_count(&list, &vec![0, 0]), 1);
+        assert_eq!(task_count(&list, &vec![99]), 0);
+    }
+
+    #[test]
+    fn line_endings() {
+        assert_eq!(LineEnding::Lf.as_str(), "\n");
+        assert_eq!(LineEnding::Crlf.as_str(), "\r\n");
+        assert_eq!(TodoList::default().line_ending, LineEnding::Lf);
+        assert!(TodoList::default().final_newline);
+    }
+}

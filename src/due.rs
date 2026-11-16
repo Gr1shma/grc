@@ -305,3 +305,341 @@ pub fn extract_inline_due_from(text: &str, today: NaiveDate) -> (String, Option<
     };
     (cleaned, Some(date))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn date(year: i32, month: u32, day: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
+    #[test]
+    fn single_word_shortcuts() {
+        let today = date(2025, 7, 21); // Monday
+        assert_eq!(resolve_relative_date_from("today", today), Some(today));
+        assert_eq!(resolve_relative_date_from("tod", today), Some(today));
+        assert_eq!(resolve_relative_date_from("t", today), Some(today));
+        assert_eq!(
+            resolve_relative_date_from("tomorrow", today),
+            Some(date(2025, 7, 22))
+        );
+        assert_eq!(
+            resolve_relative_date_from("tmr", today),
+            Some(date(2025, 7, 22))
+        );
+        assert_eq!(
+            resolve_relative_date_from("tmw", today),
+            Some(date(2025, 7, 22))
+        );
+        assert_eq!(
+            resolve_relative_date_from("tom", today),
+            Some(date(2025, 7, 22))
+        );
+        assert_eq!(
+            resolve_relative_date_from("next week", today),
+            Some(date(2025, 7, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("nextweek", today),
+            Some(date(2025, 7, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("nw", today),
+            Some(date(2025, 7, 28))
+        );
+    }
+
+    #[test]
+    fn all_weekday_forms_are_strictly_future() {
+        let today = date(2025, 7, 21); // Monday
+        let expected = [
+            ("sun", date(2025, 7, 27)),
+            ("mon", date(2025, 7, 28)),
+            ("tue", date(2025, 7, 22)),
+            ("wed", date(2025, 7, 23)),
+            ("thu", date(2025, 7, 24)),
+            ("fri", date(2025, 7, 25)),
+            ("sat", date(2025, 7, 26)),
+        ];
+        for (input, want) in expected {
+            assert_eq!(resolve_relative_date_from(input, today), Some(want));
+        }
+        for input in [
+            "sunday",
+            "monday",
+            "tuesday",
+            "wednesday",
+            "thursday",
+            "friday",
+            "saturday",
+        ] {
+            let result = resolve_relative_date_from(input, today).unwrap();
+            assert!(result > today, "{input} must be in the future");
+        }
+    }
+
+    #[test]
+    fn next_and_this_weekday() {
+        let monday = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("next mon", monday),
+            Some(date(2025, 7, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("next monday", monday),
+            Some(date(2025, 7, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("next tue", monday),
+            Some(date(2025, 7, 22))
+        );
+        assert_eq!(
+            resolve_relative_date_from("this monday", monday),
+            Some(monday)
+        );
+        assert_eq!(
+            resolve_relative_date_from("this tuesday", monday),
+            Some(date(2025, 7, 22))
+        );
+    }
+
+    #[test]
+    fn signed_offsets() {
+        let today = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("+3d", today),
+            Some(date(2025, 7, 24))
+        );
+        assert_eq!(
+            resolve_relative_date_from("-2d", today),
+            Some(date(2025, 7, 19))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+2w", today),
+            Some(date(2025, 8, 4))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+1m", today),
+            Some(date(2025, 8, 21))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+1y", today),
+            Some(date(2026, 7, 21))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+3 days", today),
+            Some(date(2025, 7, 24))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+1 month", today),
+            Some(date(2025, 8, 21))
+        );
+    }
+
+    #[test]
+    fn month_offsets_clamp_to_month_end() {
+        assert_eq!(
+            resolve_relative_date_from("+1m", date(2025, 1, 31)),
+            Some(date(2025, 2, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+1m", date(2024, 1, 31)),
+            Some(date(2024, 2, 29))
+        );
+        assert_eq!(
+            resolve_relative_date_from("-1m", date(2025, 3, 31)),
+            Some(date(2025, 2, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("-12m", date(2025, 1, 15)),
+            Some(date(2024, 1, 15))
+        );
+    }
+
+    #[test]
+    fn year_offsets_handle_leap_day() {
+        assert_eq!(
+            resolve_relative_date_from("+1y", date(2024, 2, 29)),
+            Some(date(2025, 2, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("+4y", date(2024, 2, 29)),
+            Some(date(2028, 2, 29))
+        );
+    }
+
+    #[test]
+    fn in_offsets() {
+        let today = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("in 3 days", today),
+            Some(date(2025, 7, 24))
+        );
+        assert_eq!(
+            resolve_relative_date_from("in 2 weeks", today),
+            Some(date(2025, 8, 4))
+        );
+        assert_eq!(
+            resolve_relative_date_from("in 1 month", today),
+            Some(date(2025, 8, 21))
+        );
+        assert_eq!(
+            resolve_relative_date_from("in 1 year", today),
+            Some(date(2026, 7, 21))
+        );
+    }
+
+    #[test]
+    fn month_name_and_day() {
+        let today = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("jun 15", today),
+            Some(date(2026, 6, 15))
+        );
+        assert_eq!(
+            resolve_relative_date_from("jun 15", date(2025, 6, 1)),
+            Some(date(2025, 6, 15))
+        );
+        assert_eq!(
+            resolve_relative_date_from("june 15", date(2025, 6, 15)),
+            Some(date(2025, 6, 15))
+        );
+        assert_eq!(
+            resolve_relative_date_from("JUN 15", date(2025, 6, 1)),
+            Some(date(2025, 6, 15))
+        );
+        assert_eq!(
+            resolve_relative_date_from("feb 29", date(2025, 1, 1)),
+            Some(date(2028, 2, 29))
+        );
+    }
+
+    #[test]
+    fn absolute_dates_and_separators() {
+        assert_eq!(
+            resolve_relative_date_from("2025-12-31", date(2025, 1, 1)),
+            Some(date(2025, 12, 31))
+        );
+        assert_eq!(
+            resolve_relative_date_from("2025/06/15", date(2025, 1, 1)),
+            Some(date(2025, 6, 15))
+        );
+        assert_eq!(
+            resolve_relative_date_from("2025.06.15", date(2025, 1, 1)),
+            Some(date(2025, 6, 15))
+        );
+        assert_eq!(
+            resolve_relative_date_from("2025-02-30", date(2025, 1, 1)),
+            None
+        );
+        assert_eq!(
+            resolve_relative_date_from("2025-13-01", date(2025, 1, 1)),
+            None
+        );
+    }
+
+    #[test]
+    fn whitespace_and_case_insensitivity() {
+        let today = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("  TOMORROW  ", today),
+            Some(date(2025, 7, 22))
+        );
+        assert_eq!(
+            resolve_relative_date_from("Next Monday", today),
+            Some(date(2025, 7, 28))
+        );
+    }
+
+    #[test]
+    fn overflow_is_rejected_not_panicking() {
+        let today = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("+9223372036854775807d", today),
+            None
+        );
+        assert_eq!(
+            resolve_relative_date_from("+9223372036854775807m", today),
+            None
+        );
+        assert_eq!(
+            resolve_relative_date_from("in 9223372036854775807 years", today),
+            None
+        );
+        assert_eq!(resolve_relative_date_from("mon", NaiveDate::MAX), None);
+    }
+
+    #[test]
+    fn due_token_consumes_shortest_match() {
+        let today = date(2025, 7, 21);
+        assert_eq!(
+            parse_due_token_from("2025-06-15 extra", today),
+            Some((date(2025, 6, 15), "2025-06-15".len()))
+        );
+        assert_eq!(
+            parse_due_token_from("next monday extra", today),
+            Some((date(2025, 7, 28), "next monday".len()))
+        );
+        assert_eq!(
+            parse_due_token_from("in 3 days foo", today),
+            Some((date(2025, 7, 24), "in 3 days".len()))
+        );
+        assert_eq!(
+            parse_due_token_from("tue foo", today),
+            Some((date(2025, 7, 22), "tue".len()))
+        );
+    }
+
+    #[test]
+    fn inline_due_at_end() {
+        let (text, due) = extract_inline_due_from("Buy milk due:2025-06-15", date(2025, 1, 1));
+        assert_eq!(text, "Buy milk");
+        assert_eq!(due, Some(date(2025, 6, 15)));
+    }
+
+    #[test]
+    fn inline_due_mid_text_keeps_one_space() {
+        let (text, due) = extract_inline_due_from("Submit due:tomorrow report", date(2025, 7, 21));
+        assert_eq!(text, "Submit report");
+        assert_eq!(due, Some(date(2025, 7, 22)));
+    }
+
+    #[test]
+    fn inline_due_multiword_with_trailing_text() {
+        let (text, due) =
+            extract_inline_due_from("Buy milk due:in 3 days then relax", date(2025, 7, 21));
+        assert_eq!(text, "Buy milk then relax");
+        assert_eq!(due, Some(date(2025, 7, 24)));
+    }
+
+    #[test]
+    fn inline_due_uses_last_parseable_token() {
+        let (text, due) =
+            extract_inline_due_from("Task due:2025-01-01 due:2025-06-15", date(2025, 1, 1));
+        assert_eq!(text, "Task due:2025-01-01");
+        assert_eq!(due, Some(date(2025, 6, 15)));
+    }
+
+    #[test]
+    fn inline_due_ignores_invalid_and_protected_text() {
+        let today = date(2025, 7, 21);
+        for input in ["overdue:2025-01-01", "https://example.com/due:today"] {
+            let (text, due) = extract_inline_due_from(input, today);
+            assert_eq!(text, input);
+            assert_eq!(due, None);
+        }
+        let (text, due) = extract_inline_due_from("Task due:nonsense", today);
+        assert_eq!(text, "Task due:nonsense");
+        assert_eq!(due, None);
+    }
+
+    #[test]
+    fn inline_due_never_panics_on_unicode_after_invalid_token() {
+        let today = date(2025, 7, 21);
+        for input in ["task due: é", "task due:  é", "task due:\t日本"] {
+            let (_, due) = extract_inline_due_from(input, today);
+            assert_eq!(due, None);
+        }
+    }
+}

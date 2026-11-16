@@ -204,3 +204,184 @@ pub fn clamp_right_selection(app: &mut AppState, row_count: usize) {
         app.right_state.select(Some(selected.min(row_count - 1)));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::Task;
+
+    fn sample() -> TodoList {
+        TodoList {
+            sections: vec![
+                Section {
+                    name: "work".into(),
+                    level: 1,
+                    tasks: vec![
+                        Task {
+                            text: "Task A".into(),
+                            is_done: false,
+                            due: None,
+                            leading_raw: Some(Vec::new()),
+                        },
+                        Task {
+                            text: "Task B".into(),
+                            is_done: true,
+                            due: None,
+                            leading_raw: Some(Vec::new()),
+                        },
+                    ],
+                    children: vec![Section {
+                        name: "backend".into(),
+                        level: 2,
+                        tasks: vec![Task {
+                            text: "Fix API".into(),
+                            is_done: false,
+                            due: None,
+                            leading_raw: Some(Vec::new()),
+                        }],
+                        children: vec![Section {
+                            name: "api".into(),
+                            level: 3,
+                            tasks: vec![Task {
+                                text: "Fix endpoint".into(),
+                                is_done: false,
+                                due: None,
+                                leading_raw: Some(Vec::new()),
+                            }],
+                            children: Vec::new(),
+                            leading_raw: Some(Vec::new()),
+                        }],
+                        leading_raw: Some(Vec::new()),
+                    }],
+                    leading_raw: Some(Vec::new()),
+                },
+                Section {
+                    name: "personal".into(),
+                    level: 1,
+                    tasks: vec![Task {
+                        text: "Buy milk".into(),
+                        is_done: false,
+                        due: None,
+                        leading_raw: Some(Vec::new()),
+                    }],
+                    children: Vec::new(),
+                    leading_raw: Some(Vec::new()),
+                },
+            ],
+            ..TodoList::default()
+        }
+    }
+
+    #[test]
+    fn normal_tree_is_depth_first() {
+        let items = build_tree_items(&sample(), &Mode::Normal);
+        assert_eq!(
+            items,
+            vec![
+                TreeItem::Node(vec![0]),
+                TreeItem::Node(vec![0, 0]),
+                TreeItem::Node(vec![0, 0, 0]),
+                TreeItem::Node(vec![1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_tree() {
+        assert!(build_tree_items(&TodoList::default(), &Mode::Normal).is_empty());
+    }
+
+    #[test]
+    fn filter_by_section_name_case_insensitively() {
+        let items = build_visible_tree_items(&sample(), &Mode::Normal, "personal");
+        assert_eq!(items, vec![TreeItem::Node(vec![1])]);
+    }
+
+    #[test]
+    fn filter_keeps_ancestors_of_matching_task() {
+        let items = build_visible_tree_items(&sample(), &Mode::Normal, "endpoint");
+        assert_eq!(
+            items,
+            vec![
+                TreeItem::Node(vec![0]),
+                TreeItem::Node(vec![0, 0]),
+                TreeItem::Node(vec![0, 0, 0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn section_name_matches_take_priority_over_task_matches() {
+        let mut list = sample();
+        list.sections[0].tasks[0].text = "personal notes".into();
+        let items = build_visible_tree_items(&list, &Mode::Normal, "personal");
+        assert_eq!(items, vec![TreeItem::Node(vec![1])]);
+    }
+
+    #[test]
+    fn filter_by_due_date() {
+        let mut list = sample();
+        list.sections[1].tasks[0].due = Some(chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap());
+        let items = build_visible_tree_items(&list, &Mode::Normal, "2025-06");
+        assert_eq!(items, vec![TreeItem::Node(vec![1])]);
+    }
+
+    #[test]
+    fn selected_node_ignores_missing_and_ghost_rows() {
+        let mut app = AppState::new(0);
+        app.tree_items = vec![TreeItem::Node(vec![0]), TreeItem::Ghost(0)];
+        assert!(selected_node(&app).is_none());
+
+        app.left_state.select(Some(0));
+        assert_eq!(selected_node(&app), Some(vec![0]));
+
+        app.left_state.select(Some(1));
+        assert!(selected_node(&app).is_none());
+
+        app.left_state.select(Some(99));
+        assert!(selected_node(&app).is_none());
+    }
+
+    #[test]
+    fn clamp_clears_dangling_selection() {
+        let mut app = AppState::new(0);
+        app.tree_items.clear();
+        app.left_state.select(Some(4));
+        clamp_left_selection(&mut app);
+        assert_eq!(app.left_state.selected(), None);
+
+        app.tree_items = vec![TreeItem::Node(vec![0])];
+        app.left_state.select(Some(4));
+        clamp_left_selection(&mut app);
+        assert_eq!(app.left_state.selected(), Some(0));
+
+        app.right_state.select(Some(7));
+        clamp_right_selection(&mut app, 2);
+        assert_eq!(app.right_state.selected(), Some(1));
+        clamp_right_selection(&mut app, 0);
+        assert_eq!(app.right_state.selected(), None);
+    }
+
+    #[test]
+    fn ghost_is_inserted_at_requested_position() {
+        let list = sample();
+        let input = crate::tui::state::SectionInput {
+            node: None,
+            parent: Some(vec![0]),
+            insert_idx: Some(0),
+            level: 2,
+            field: crate::tui::state::TextField::default(),
+        };
+        let items = build_tree_items(&list, &Mode::InputSection(input));
+        assert_eq!(items[1], TreeItem::Ghost(1));
+    }
+
+    #[test]
+    fn heading_level_lookup() {
+        let list = sample();
+        assert_eq!(node_level(&list, &[0]), 1);
+        assert_eq!(node_level(&list, &[0, 0]), 2);
+        assert_eq!(node_level(&list, &[0, 0, 0]), 3);
+        assert_eq!(node_level(&list, &[99]), 1);
+    }
+}

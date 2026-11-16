@@ -372,3 +372,123 @@ fn scroll(app: &mut AppState, todo_list: &TodoList, delta: isize) {
 pub fn percentage(total: u16, percent: u16) -> u16 {
     (u32::from(total) * u32::from(percent) / 100) as u16
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_str;
+
+    fn list() -> TodoList {
+        parse_str("# main\n## sub\n- [ ] A\n## other\n- [ ] B\n")
+    }
+
+    #[test]
+    fn filter_anchor_keeps_selected_node_while_typing() {
+        let list = list();
+        let mut app = AppState::new(list.sections.len());
+        app.mode = Mode::Filter;
+        app.filter_anchor = Some(vec![0, 0]);
+        app.filter = "sub".into();
+        app.filter_lower = "sub".into();
+
+        refresh_view(&mut app, &list);
+
+        assert_eq!(selected_node(&app), Some(vec![0, 0]));
+    }
+
+    #[test]
+    fn filter_anchor_falls_back_when_node_disappears() {
+        let list = list();
+        let mut app = AppState::new(list.sections.len());
+        app.mode = Mode::Filter;
+        app.filter_anchor = Some(vec![0, 0]);
+        app.filter = "other".into();
+        app.filter_lower = "other".into();
+
+        refresh_view(&mut app, &list);
+
+        assert!(
+            app.left_state
+                .selected()
+                .is_some_and(|i| i < app.tree_items.len())
+        );
+    }
+
+    #[test]
+    fn stale_selection_is_clamped() {
+        let list = list();
+        let mut app = AppState::new(list.sections.len());
+        app.left_state.select(Some(99));
+        app.right_state.select(Some(99));
+
+        refresh_view(&mut app, &list);
+
+        assert!(
+            app.left_state
+                .selected()
+                .is_some_and(|i| i < app.tree_items.len())
+        );
+        assert!(app.right_state.selected().is_some());
+    }
+
+    #[test]
+    fn filter_restore_selects_node_and_task() {
+        let list = parse_str("# main\n- [ ] A\n- [ ] B\n");
+        let mut app = AppState::new(list.sections.len());
+        app.focus = Focus::Right;
+        app.filter_restore = Some(state::SelectionSnapshot {
+            node: Some(vec![0]),
+            task: Some(TaskRef {
+                node: vec![0],
+                task_idx: 1,
+                sub_name: None,
+            }),
+        });
+
+        refresh_view(&mut app, &list);
+
+        assert_eq!(selected_node(&app), Some(vec![0]));
+        assert_eq!(app.right_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn task_input_selects_node_and_ghost_position() {
+        let list = list();
+        let mut app = AppState::new(list.sections.len());
+        app.mode = Mode::InputTask(state::TaskInput {
+            editing_idx: None,
+            insert_idx: Some(0),
+            above: false,
+            node: vec![0, 1],
+            field: state::TextField::new("new"),
+        });
+
+        refresh_view(&mut app, &list);
+
+        assert_eq!(selected_node(&app), Some(vec![0, 1]));
+        assert_eq!(app.right_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn task_input_at_end_selects_the_ghost_row() {
+        let list = list();
+        let mut app = AppState::new(list.sections.len());
+        app.mode = Mode::InputTask(state::TaskInput {
+            editing_idx: None,
+            insert_idx: Some(2),
+            above: false,
+            node: vec![0],
+            field: state::TextField::new("new"),
+        });
+
+        refresh_view(&mut app, &list);
+
+        assert_eq!(app.right_state.selected(), Some(2));
+    }
+
+    #[test]
+    fn percentage_does_not_overflow() {
+        assert_eq!(percentage(u16::MAX, 55), 36044);
+        assert_eq!(percentage(100, 27), 27);
+    }
+}
