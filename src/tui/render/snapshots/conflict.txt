@@ -10,5 +10,5 @@
 │                 ││                                                   │
 │                 ││                                                   │
 ╰─────────────────╯╰───────────────────────────────────────────────────╯
- r reload  ·  o overwrite                                               
- CONFLICT  file changed on disk — r reload / o overwrite   1/6  todo.md 
+ r reload  ·  o overwrite  ·  q refused                                 
+ CONFLICT  file changed on disk — choose below             1/6  todo.md 

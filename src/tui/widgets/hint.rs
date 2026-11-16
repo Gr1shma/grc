@@ -28,7 +28,9 @@ pub fn draw(f: &mut Frame, app: &AppState, area: Rect, theme: &Theme) {
         ],
         Mode::Filter => &[("type", "filter"), ("Enter", "apply"), ("Esc", "clear")],
         Mode::Help => &[("j/k", "scroll"), ("Esc/q/?", "close")],
-        Mode::Conflict => &[("r", "reload"), ("o", "overwrite")],
+        // A conflict blocks saving and quitting alike, so `q` is a choice here
+        // rather than an invisible no-op.
+        Mode::Conflict => &[("r", "reload"), ("o", "overwrite"), ("q", "refused")],
         Mode::InputTask(_) | Mode::InputSection(_) => &[
             ("Enter", "save"),
             ("Esc", "cancel"),

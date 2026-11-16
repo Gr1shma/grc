@@ -273,11 +273,12 @@ mod tests {
     fn conflict_snapshot_offers_reload_and_overwrite() {
         let (todo, mut app) = normal_state();
         app.mode = Mode::Conflict;
-        app.set_error("file changed on disk — r reload / o overwrite");
+        app.set_error("file changed on disk — choose below");
         prepare(&mut app, &todo);
         assert_snapshot("conflict", CONFLICT, render(72, 14, &todo, &app));
         assert!(CONFLICT.contains("CONFLICT"));
         assert!(CONFLICT.contains("r reload"));
+        assert!(CONFLICT.contains("q refused"), "{CONFLICT}");
     }
 
     #[test]

@@ -114,7 +114,10 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
             ("Ctrl-a / Ctrl-e", "start / end of input"),
             ("Backspace / Delete", "delete before / at cursor"),
             ("Enter / Esc", "confirm / cancel input"),
-            ("r / o", "reload / overwrite on conflict"),
+            (
+                "r / o / q",
+                "on conflict: reload / overwrite / refuse to quit",
+            ),
             ("wheel / click", "move selection / select a row"),
             ("NO_COLOR=1", "disable colour"),
             ("GRC_BG=1", "paint the dark canvas"),

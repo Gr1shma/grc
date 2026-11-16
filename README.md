@@ -157,7 +157,7 @@ happened. A filter that does not hide the target is left alone.
 | `Backspace` / `Delete` | Delete before / at the cursor |
 | type, `Backspace`, `Enter`, `Esc` | Filter prompt: append, delete, apply, clear |
 | `j` / `k`, `Esc` / `q` / `?` | Scroll / close the help overlay |
-| `r` / `o` | On an external-change conflict: reload / overwrite |
+| `r` / `o` / `q` | On an external-change conflict: reload / overwrite / refuse to quit |
 
 The filter is an append-only prompt: `Backspace` removes the last character.
 Text inputs (task, section, due date) use the full cursor editor above, and in
@@ -228,7 +228,8 @@ Every document change is written immediately with an atomic replace, and `q` sav
 Before each save, `grc` compares the file's modification time and length with the last load/save. If another program changed the file, `grc` does not overwrite it silently: the status bar shows a conflict and:
 
 - `r` reloads the file from disk (discarding in-memory changes);
-- `o` overwrites the file with the in-memory document.
+- `o` overwrites the file with the in-memory document;
+- `q` refuses to quit: the hint bar lists all three while the conflict stands.
 
 Save errors and conflicts appear in the status bar instead of closing the terminal. Quitting retries the save.
 

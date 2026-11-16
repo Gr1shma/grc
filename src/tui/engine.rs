@@ -214,8 +214,7 @@ impl Engine {
 
     fn enter_conflict(&mut self) {
         self.app.mode = Mode::Conflict;
-        self.app
-            .set_error("file changed on disk — r reload / o overwrite");
+        self.app.set_error("file changed on disk — choose below");
     }
 
     /// Replace the document with the one on disk.
