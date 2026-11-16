@@ -126,6 +126,7 @@ mod snapshots {
     const HELP: &str = include_str!("snapshots/help.txt");
     const EMPTY: &str = include_str!("snapshots/empty.txt");
     const NARROW: &str = include_str!("snapshots/narrow.txt");
+    const CONFLICT: &str = include_str!("snapshots/conflict.txt");
 
     #[test]
     fn normal_snapshot() {
@@ -205,6 +206,34 @@ mod snapshots {
         let (todo, app) = normal_state();
         assert_snapshot("narrow", NARROW, render(40, 10, &todo, &app));
         assert!(NARROW.contains("today"));
+    }
+
+    #[test]
+    fn conflict_snapshot_offers_reload_and_overwrite() {
+        let (todo, mut app) = normal_state();
+        app.mode = Mode::Conflict;
+        app.set_error("file changed on disk — r reload / o overwrite");
+        prepare(&mut app, &todo);
+        assert_snapshot("conflict", CONFLICT, render(72, 14, &todo, &app));
+        assert!(CONFLICT.contains("CONFLICT"));
+        assert!(CONFLICT.contains("r reload"));
+    }
+
+    #[test]
+    fn long_task_lists_draw_a_scrollbar() {
+        let mut content = String::from("# main\n");
+        for index in 0..30 {
+            content.push_str(&format!("- [ ] task {index}\n"));
+        }
+        let todo = parse_str(&content);
+        let mut app = AppState::new_with_today(1, TODAY);
+        app.focus = Focus::Right;
+        prepare(&mut app, &todo);
+        let rendered = render(60, 12, &todo, &app);
+        assert!(
+            rendered.contains('█'),
+            "expected a scrollbar thumb:\n{rendered}"
+        );
     }
 
     #[test]
