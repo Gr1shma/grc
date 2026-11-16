@@ -388,7 +388,7 @@ struct InlineDue {
 }
 
 fn inline_due(buf: &str, today: NaiveDate) -> Option<InlineDue> {
-    let index = buf
+    let candidates: Vec<usize> = buf
         .match_indices("due:")
         .filter(|(index, _)| {
             *index == 0
@@ -398,17 +398,23 @@ fn inline_due(buf: &str, today: NaiveDate) -> Option<InlineDue> {
                     .is_some_and(char::is_whitespace)
         })
         .map(|(index, _)| index)
-        .last()?;
+        .collect();
 
-    let after = &buf[index + "due:".len()..];
-    if let Some((date, consumed)) = parse_due_token_from(after, today) {
-        return Some(InlineDue {
-            start: index,
-            end: index + "due:".len() + consumed,
-            parsed: Some(date),
-        });
+    // Match `extract_inline_due_from`: the last token that parses is the one
+    // that will be applied, so a trailing typo must not hide it.
+    for index in candidates.iter().rev() {
+        let after = &buf[*index + "due:".len()..];
+        if let Some((date, consumed)) = parse_due_token_from(after, today) {
+            return Some(InlineDue {
+                start: *index,
+                end: *index + "due:".len() + consumed,
+                parsed: Some(date),
+            });
+        }
     }
 
+    let index = *candidates.last()?;
+    let after = &buf[index + "due:".len()..];
     let end = after
         .find(char::is_whitespace)
         .map_or(buf.len(), |offset| index + "due:".len() + offset);
@@ -614,5 +620,22 @@ mod tests {
             "due:nonsense"
         );
         assert!(invalid.parsed.is_none());
+    }
+
+    #[test]
+    fn inline_due_previews_the_token_that_will_be_applied() {
+        // Commit takes the last parseable token; the preview must agree even
+        // when a later token is unparseable.
+        let buf = "Ship it due:tomorrow due:nonsense";
+        let due = inline_due(buf, today()).unwrap();
+        assert_eq!(&buf[due.start..due.end], "due:tomorrow");
+        assert_eq!(
+            due.parsed,
+            Some(NaiveDate::from_ymd_opt(2025, 7, 22).unwrap())
+        );
+        assert_eq!(
+            crate::due::extract_inline_due_from(buf, today()),
+            ("Ship it due:nonsense".to_string(), due.parsed)
+        );
     }
 }
