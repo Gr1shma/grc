@@ -488,17 +488,35 @@ fn commit_section(
 
 fn move_task(app: &mut AppState, todo_list: &mut TodoList, target: &TaskRef, delta: isize) -> bool {
     let visible_node = selected_node(app);
-    let Some(section) = get_node_mut(todo_list, &target.node) else {
-        return false;
-    };
-    let Some(new_index) = offset_index(target.task_idx, section.tasks.len(), delta) else {
-        return false;
-    };
-    section.tasks.swap(target.task_idx, new_index);
-
     let refs = visible_node
         .as_ref()
         .map_or_else(Vec::new, |node| refs_for(app, todo_list, node));
+    let Some(position) = refs.iter().position(|reference| {
+        reference.node == target.node && reference.task_idx == target.task_idx
+    }) else {
+        return false;
+    };
+    // Reorder against the neighbour the user can see. Swapping with the next
+    // document index would silently move the task past hidden or filtered rows.
+    let Some(neighbour) =
+        offset_index(position, refs.len(), delta).and_then(|index| refs.get(index))
+    else {
+        return false;
+    };
+    // A swap can only reorder siblings; moving between sections is not a move.
+    if neighbour.node != target.node {
+        return false;
+    }
+    let new_index = neighbour.task_idx;
+
+    let Some(section) = get_node_mut(todo_list, &target.node) else {
+        return false;
+    };
+    if target.task_idx >= section.tasks.len() || new_index >= section.tasks.len() {
+        return false;
+    }
+    section.tasks.swap(target.task_idx, new_index);
+
     if let Some(position) = refs
         .iter()
         .position(|reference| reference.node == target.node && reference.task_idx == new_index)
@@ -650,6 +668,52 @@ mod tests {
         ));
         assert_eq!(list.sections[1].name, "c");
         assert_eq!(selected_node(&app), Some(vec![1]));
+    }
+
+    #[test]
+    fn moving_a_task_reorders_against_visible_rows_only() {
+        let mut list = parse_str("# main\n- [ ] A\n- [x] B\n- [ ] C\n");
+        let mut app = app(&list);
+        app.hide_done = true;
+        app.focus = Focus::Right;
+        let target = TaskRef {
+            node: vec![0],
+            task_idx: 0,
+            sub_name: None,
+        };
+        assert!(apply(
+            Action::MoveTask { target, delta: 1 },
+            &mut app,
+            &mut list
+        ));
+
+        let texts: Vec<_> = list.sections[0]
+            .tasks
+            .iter()
+            .map(|task| task.text.as_str())
+            .collect();
+        // C and A swap; the hidden done task stays where it was.
+        assert_eq!(texts, ["C", "B", "A"]);
+        assert_eq!(app.right_state.selected(), Some(1));
+    }
+
+    #[test]
+    fn moving_a_task_never_crosses_into_a_child_section() {
+        let mut list = parse_str("# main\n- [ ] A\n## child\n- [ ] B\n");
+        let mut app = app(&list);
+        app.focus = Focus::Right;
+        let target = TaskRef {
+            node: vec![0],
+            task_idx: 0,
+            sub_name: None,
+        };
+        assert!(!apply(
+            Action::MoveTask { target, delta: 1 },
+            &mut app,
+            &mut list
+        ));
+        assert_eq!(list.sections[0].tasks[0].text, "A");
+        assert_eq!(list.sections[0].children[0].tasks[0].text, "B");
     }
 
     #[test]
