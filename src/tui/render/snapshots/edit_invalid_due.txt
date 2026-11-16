@@ -1,0 +1,14 @@
+╭ Sections ───────╮╭ Work ─────────────────────────────────────────────╮
+│▾ Work        1/5││☐ Ship re… due:nonsense│  ! invalid — old date kept│
+│    Urgent    0/2││☑ Write docs                                       │
+│  Home        0/1││☐ Plan next week                        Mar 1, 2027│
+│                 ││☐ Urgent › Fix bug                              tmr│
+│                 ││☐ Urgent › Call back                               │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+╰─────────────────╯╰───────────────────────────────────────────────────╯
+ Enter save  ·  Esc cancel  ·  empty clears                             
+ EDIT                                                      1/6  todo.md 

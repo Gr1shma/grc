@@ -214,45 +214,26 @@ fn due_editing_item(
     }
 
     let prefix = "due:";
-    let field_style = match resolve_relative_date_from(field.buf.trim(), ctx.today) {
+    let parsed = resolve_relative_date_from(field.buf.trim(), ctx.today);
+    let field_style = match parsed {
         Some(_) => ctx.theme.match_style(),
         None if field.buf.trim().is_empty() => ctx.theme.dim_style(),
         None => ctx.theme.error_style(),
     };
-    let text_room = ctx
-        .width
-        .saturating_sub(used + display_width(prefix) + field.buf.chars().count() + 1);
+    let (preview_text, preview_style) =
+        due_preview_text(parsed, field.buf.trim().is_empty(), ctx.today, ctx.theme);
+    let suffix_width =
+        display_width(prefix) + field.buf.chars().count() + 1 + display_width(&preview_text);
+    let text_room = ctx.width.saturating_sub(used + suffix_width + 1);
     let text = truncate_ellipsis(&task.text, text_room, ctx.theme.glyphs.ellipsis);
     spans.push(Span::styled(text.clone(), ctx.theme.text_style()));
     used += display_width(&text);
-    let padding = ctx
-        .width
-        .saturating_sub(used + display_width(prefix) + field.buf.chars().count() + 1);
-    spans.push(Span::raw(" ".repeat(padding)));
+    spans.push(Span::raw(
+        " ".repeat(ctx.width.saturating_sub(used + suffix_width)),
+    ));
     spans.push(Span::styled(prefix.to_string(), ctx.theme.dim_style()));
     spans.extend(buffer_spans(field, None, field_style, ctx.theme));
-
-    match resolve_relative_date_from(field.buf.trim(), ctx.today) {
-        Some(date) => spans.push(Span::styled(
-            format!(
-                "  {} {}",
-                ctx.theme.glyphs.preview,
-                format_due(date, ctx.today)
-            ),
-            ctx.theme.due_style(urgency_for_date(date, ctx.today)),
-        )),
-        None if field.buf.trim().is_empty() => spans.push(Span::styled(
-            format!("  {} cleared", ctx.theme.glyphs.preview),
-            ctx.theme.dim_style(),
-        )),
-        None => spans.push(Span::styled(
-            format!(
-                "  {} invalid date — old date kept",
-                ctx.theme.glyphs.invalid_due
-            ),
-            ctx.theme.error_style(),
-        )),
-    }
+    spans.push(Span::styled(preview_text, preview_style));
     ListItem::new(Line::from(spans))
 }
 
@@ -457,6 +438,28 @@ fn buffer_spans(
 
 fn cursor_span(theme: &Theme) -> Span<'static> {
     Span::styled(theme.glyphs.cursor.to_string(), theme.cursor_style())
+}
+
+fn due_preview_text(
+    parsed: Option<NaiveDate>,
+    empty: bool,
+    today: NaiveDate,
+    theme: &Theme,
+) -> (String, Style) {
+    match parsed {
+        Some(date) => (
+            format!("  {} {}", theme.glyphs.preview, format_due(date, today)),
+            theme.due_style(urgency_for_date(date, today)),
+        ),
+        None if empty => (
+            format!("  {} cleared", theme.glyphs.preview),
+            theme.dim_style(),
+        ),
+        None => (
+            format!("  {} invalid — old date kept", theme.glyphs.invalid_due),
+            theme.error_style(),
+        ),
+    }
 }
 
 fn due_preview(due: Option<&InlineDue>, today: NaiveDate, theme: &Theme) -> Option<Span<'static>> {

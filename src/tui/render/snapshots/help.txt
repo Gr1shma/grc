@@ -1,0 +1,20 @@
+╭ Sections ─╭ Keybindings ─────────────────────────────────────────╮───────────╮
+│▾ Work     │  Navigate                                            │      today│
+│    Urgent │    j/k, ↓/↑            move or scroll                │           │
+│  Home     │    gg / G              top / bottom                  │Mar 1, 2027│
+│           │    5j / 3k             count motion                  │        tmr│
+│           │    l/Enter             focus tasks                   │           │
+│           │    h/Esc/Tab           back to sections              │           │
+│           │    J / K               move task/section             │           │
+│           │    za / zM / zR        fold / fold all / unfold all  │           │
+│           │    ]d                  next overdue                  │           │
+│           │    H                   hide/show completed           │           │
+│           │    q / Ctrl-c          quit                          │           │
+│           │                                                      │           │
+│           │  Edit                                                │           │
+│           │    a / A               new section below (level)     │           │
+│           │    o / O               new section below/above       │           │
+│           │    i / dd              rename / delete section       │           │
+╰───────────│    yy / p / P          yank / paste below / above    │───────────╯
+ j/k scroll │    a / A / o / O       add task (A appends)          │            
+ HELP  j/k s╰──────────────────────────────────────────────────────╯/6  todo.md 

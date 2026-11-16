@@ -1,0 +1,14 @@
+╭ Sections · filte╮╭ Work ─────────────────────────────────────────────╮
+│▾ Work        1/5││☐ Urgent › Fix bug                              tmr│
+│    Urgent    0/2││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+│                 ││                                                   │
+╰─────────────────╯╰───────────────────────────────────────────────────╯
+ type filter  ·  Enter apply  ·  Esc clear                              
+ FILTER  /bug  1 match                                     1/6  todo.md 
