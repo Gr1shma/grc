@@ -105,7 +105,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
     use std::path::Path;
 
     const TODAY: NaiveDate = NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
@@ -561,5 +561,48 @@ mod tests {
             }
         }
         assert_eq!(theme.selection_style(true).bg, None);
+    }
+
+    const NO_COLOUR: &str = include_str!("snapshots/no_colour.txt");
+
+    #[test]
+    fn no_colour_snapshot_keeps_the_selection_visible() {
+        let (todo, app) = normal_state();
+        let theme = Theme::new(false, false);
+        let frame = render_with(&theme, 72, 14, &todo, &app);
+        assert_snapshot("no_colour", NO_COLOUR, frame.clone());
+        assert!(frame.contains('▌'), "the gutter bar marks the selection");
+        assert!(frame.contains('□') && frame.contains('✓'));
+        // Colour is gone, so the bar has to be carried by the attribute alone.
+        let buffer = cells(72, 14, &todo, &app, &theme);
+        let [_, right] = panel_split(Rect::new(0, 0, 72, 12));
+        let cell = &buffer[(right.x + 2, 1)];
+        assert!(cell.modifier.contains(Modifier::BOLD | Modifier::REVERSED));
+    }
+
+    const ASCII: &str = include_str!("snapshots/ascii.txt");
+
+    #[test]
+    fn ascii_snapshot_uses_only_ascii_glyphs() {
+        let (todo, app) = normal_state();
+        let theme = Theme::new(true, true);
+        let frame = render_with(&theme, 72, 14, &todo, &app);
+        assert_snapshot("ascii", ASCII, frame.clone());
+        // `GRC_ASCII` covers the data glyphs — checkboxes, folds, the selection
+        // marker, the ellipsis, the scrollbar — not the box-drawing chrome,
+        // which every terminal that can run a TUI draws.
+        assert!(frame.contains("[ ]") && frame.contains("[x]"));
+        assert!(frame.contains("|v Work"), "the fold and gutter markers");
+        for glyph in ['□', '✓', '▾', '▌', '…', '›', '█'] {
+            assert!(!frame.contains(glyph), "{glyph} survived GRC_ASCII");
+        }
+    }
+
+    #[test]
+    fn no_colour_and_ascii_can_be_combined() {
+        let (todo, app) = normal_state();
+        let frame = render_with(&Theme::new(false, true), 72, 14, &todo, &app);
+        assert!(frame.contains("|[ ] Ship release"));
+        assert!(!frame.contains('▌'), "the ASCII bar still marks the row");
     }
 }
