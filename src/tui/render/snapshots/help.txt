@@ -11,10 +11,10 @@
 │           │    H                   hide/show completed           │           │
 │           │    q / Ctrl-c          quit                          │           │
 │           │                                                      │           │
-│           │  Edit                                                │           │
+│           │  Sections                                            │           │
 │           │    a                   new child section             │           │
 │           │    A                   new section above the parent  │           │
 │           │    o / O               new section below / above     │           │
-╰───────────│    i / dd              rename / delete section       │───────────╯
- j/k scroll │    yy / p / P          yank / paste below / above    │            
+╰───────────│    i                   rename section                │───────────╯
+ j/k scroll │    dd                  delete section and subtree    │            
  HELP  j/k s╰──────────────────────────────────────────────────────╯/6  todo.md 

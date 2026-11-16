@@ -77,7 +77,9 @@ cell wide and outside the emoji set.
 
 ## Keybindings
 
-Press `?` in the app for the same list, grouped as Navigate / Edit / Dates / Misc.
+Press `?` in the app for the same list, grouped as Navigate / Sections / Tasks /
+Dates / Misc, so the section keys and the task keys are each listed together
+rather than interleaved.
 A count prefix applies to `j`/`k` motions and to multi-task `dd`; other commands
 ignore it.
 

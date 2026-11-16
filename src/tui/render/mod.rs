@@ -246,8 +246,8 @@ mod tests {
         prepare(&mut app, &todo);
         assert_snapshot("help", HELP, render(80, 20, &todo, &app));
         assert!(HELP.contains("Navigate"));
-        assert!(HELP.contains("Edit"));
-        // Dates and Misc are below the fold; the help module tests all groups.
+        assert!(HELP.contains("Sections"));
+        // Tasks, Dates and Misc are below the fold; the help module tests them.
     }
 
     #[test]

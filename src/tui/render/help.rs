@@ -59,19 +59,27 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
     group(
         &mut lines,
         theme,
-        "Edit",
+        "Sections",
         &[
             ("a", "new child section"),
             ("A", "new section above the parent"),
             ("o / O", "new section below / above"),
-            ("i / dd", "rename / delete section"),
+            ("i", "rename section"),
+            ("dd", "delete section and subtree"),
             ("yy / p / P", "yank / paste below / above"),
-            ("a / A / o / O", "add task (A appends)"),
+        ],
+    );
+    group(
+        &mut lines,
+        theme,
+        "Tasks",
+        &[
+            ("a / o", "add task below"),
+            ("A / O", "add task above (A appends)"),
             ("i / t", "edit text / due date"),
             ("x / Space / Enter", "toggle task"),
-            ("dd / yy / p / P", "delete / yank / paste task"),
-            ("3dd", "delete three tasks"),
-            ("u / Ctrl-r", "undo / redo"),
+            ("dd", "delete task(s), 3dd deletes three"),
+            ("yy / p / P", "yank / paste below / above"),
             (":", "sort section by due date"),
         ],
     );
@@ -98,6 +106,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
         theme,
         "Misc",
         &[
+            ("u / Ctrl-r", "undo / redo"),
             ("/", "live filter (type, Enter, Esc)"),
             ("Esc", "clear filter / go back"),
             ("? / Esc / q", "open / close help"),
@@ -140,16 +149,44 @@ fn group(lines: &mut Vec<Line<'static>>, theme: &Theme, title: &str, entries: &[
 mod tests {
     use super::*;
 
-    #[test]
-    fn help_has_all_four_groups() {
-        let text: String = help_content(&Theme::plain())
+    /// Flatten the overlay into one string for assertions.
+    fn help_text() -> String {
+        help_content(&Theme::plain())
             .iter()
             .flat_map(|line| line.spans.iter())
             .map(|span| span.content.as_ref())
             .collect::<Vec<_>>()
-            .join("");
-        for heading in ["Navigate", "Edit", "Dates", "Misc"] {
+            .join("")
+    }
+
+    #[test]
+    fn help_groups_every_key_once() {
+        let text = help_text();
+        for heading in ["Navigate", "Sections", "Tasks", "Dates", "Misc"] {
             assert!(text.contains(heading), "missing {heading}");
+        }
+        // Section keys and task keys are grouped per panel, not interleaved.
+        let sections = text.find("Sections").unwrap();
+        let tasks = text.find("  Tasks").unwrap();
+        let dates = text.find("  Dates").unwrap();
+        assert!(sections < tasks && tasks < dates);
+        assert!(text.contains("rename section"));
+        assert!(text.contains("delete task(s)"));
+        // Every key of both panels is listed, and nothing claims to be both.
+        for key in [
+            "a",
+            "A",
+            "o / O",
+            "i",
+            "dd",
+            "yy / p / P",
+            "a / o",
+            "A / O",
+            "i / t",
+            "x / Space / Enter",
+            ":",
+        ] {
+            assert!(text.contains(&format!("{key:<20}")), "missing key {key}");
         }
     }
 
