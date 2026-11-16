@@ -23,11 +23,11 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
     let focused = Panel::Left.is_focused(app);
 
     let title = if app.filter.is_empty() {
-        "Sections"
+        "Sections".to_string()
     } else {
-        "Sections · filtered"
+        format!("Sections {} filtered", theme.glyphs.separator)
     };
-    let block = panel(theme, title, focused);
+    let block = panel(theme, &title, focused);
 
     let (renaming_node, rename_field, ghost_field) = match &app.mode {
         Mode::InputSection(input) => (input.node.as_ref(), Some(&input.field), Some(&input.field)),

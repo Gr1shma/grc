@@ -1,7 +1,7 @@
 //! Centered popup geometry and dialog chrome.
 
 use crate::tui::theme::Theme;
-use crate::tui::widgets::{BORDER_TYPE, percentage};
+use crate::tui::widgets::{border_set, percentage};
 use ratatui::layout::Rect;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders};
@@ -18,11 +18,11 @@ pub fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
     }
 }
 
-/// Rounded dialog block with an accented title.
+/// Dialog block with an accented title, in the theme's border style.
 pub fn dialog<'a>(theme: &Theme, title: impl Into<String>) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BORDER_TYPE)
+        .border_set(border_set(theme))
         .title(Span::styled(
             format!(" {} ", title.into()),
             theme.dialog_title(),

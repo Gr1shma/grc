@@ -80,7 +80,7 @@ fn middle_text(todo_list: &TodoList, app: &AppState, theme: &Theme) -> (String, 
 
     if matches!(app.mode, Mode::Help) {
         return (
-            "j/k scroll · Esc or q to close".to_string(),
+            format!("j/k scroll {} Esc or q to close", theme.glyphs.separator),
             theme.dim_style(),
         );
     }

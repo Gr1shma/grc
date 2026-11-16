@@ -118,7 +118,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
             ("wheel / click", "move selection / select a row"),
             ("NO_COLOR=1", "disable colour"),
             ("GRC_BG=1", "paint the dark canvas"),
-            ("GRC_ASCII=1", "ASCII checkboxes and folds"),
+            ("GRC_ASCII=1", "ASCII glyphs and borders"),
         ],
     );
     lines.push(Line::from(""));

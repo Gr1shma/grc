@@ -7,12 +7,34 @@ pub mod status;
 use crate::tui::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use ratatui::symbols::border;
 use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::widgets::{Block, Borders};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// Border style used by every panel and dialog in the interface.
-pub const BORDER_TYPE: BorderType = BorderType::Rounded;
+/// Rounded box-drawing border for terminals with the full Unicode box set.
+pub const ROUNDED_BORDER: border::Set<'static> = border::ROUNDED;
+
+/// `+ - |` border for `GRC_ASCII=1`.
+pub const ASCII_BORDER: border::Set<'static> = border::Set {
+    top_left: "+",
+    top_right: "+",
+    bottom_left: "+",
+    bottom_right: "+",
+    vertical_left: "|",
+    vertical_right: "|",
+    horizontal_top: "-",
+    horizontal_bottom: "-",
+};
+
+/// The border glyph set for the theme.
+pub fn border_set(theme: &Theme) -> border::Set<'static> {
+    if theme.ascii {
+        ASCII_BORDER
+    } else {
+        ROUNDED_BORDER
+    }
+}
 
 /// Blank cells between a panel's border and its content.
 ///
@@ -27,7 +49,7 @@ pub const GUTTER: usize = 1;
 pub fn panel<'a>(theme: &Theme, title: &str, focused: bool) -> Block<'a> {
     Block::default()
         .borders(Borders::ALL)
-        .border_type(BORDER_TYPE)
+        .border_set(border_set(theme))
         .title(Span::styled(format!(" {title} "), theme.title(focused)))
         .border_style(theme.border(focused))
         .style(theme.panel_style())

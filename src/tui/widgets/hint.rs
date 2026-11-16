@@ -41,7 +41,10 @@ pub fn draw(f: &mut Frame, app: &AppState, area: Rect, theme: &Theme) {
     let mut spans = vec![Span::raw(" ")];
     for (index, (key, description)) in hints.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::styled("  ·  ", theme.hint_style()));
+            spans.push(Span::styled(
+                format!("  {}  ", theme.glyphs.separator),
+                theme.hint_style(),
+            ));
         }
         spans.push(Span::styled((*key).to_string(), theme.key_style()));
         spans.push(Span::raw(" "));

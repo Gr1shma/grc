@@ -205,7 +205,7 @@ pub struct Glyphs {
     /// Scrollbar thumb.
     pub scroll_thumb: &'static str,
     /// Separator between hint-line entries.
-    pub hint_separator: &'static str,
+    pub separator: &'static str,
 }
 
 impl Glyphs {
@@ -225,7 +225,7 @@ impl Glyphs {
             selection_marker: "▌",
             scroll_track: "│",
             scroll_thumb: "█",
-            hint_separator: "·",
+            separator: "·",
         }
     }
 
@@ -245,7 +245,7 @@ impl Glyphs {
             selection_marker: "|",
             scroll_track: "|",
             scroll_thumb: "#",
-            hint_separator: "|",
+            separator: "|",
         }
     }
 }
@@ -1297,7 +1297,7 @@ mod tests {
             ("selection_marker", glyphs.selection_marker),
             ("scroll_track", glyphs.scroll_track),
             ("scroll_thumb", glyphs.scroll_thumb),
-            ("hint_separator", glyphs.hint_separator),
+            ("separator", glyphs.separator),
         ]
     }
 
@@ -1332,6 +1332,34 @@ mod tests {
 
     /// Pinned on purpose: the layout arithmetic assumes one cell per glyph, so
     /// a new glyph has to be added here (and checked by the test above).
+    #[test]
+    fn the_ascii_theme_swaps_the_borders_too() {
+        use crate::tui::widgets::border_set;
+        let unicode = border_set(&Theme::truecolor(true, false));
+        assert_eq!(unicode.top_left, "╭");
+        let ascii = border_set(&Theme::truecolor(true, true));
+        let glyphs = [
+            ascii.top_left,
+            ascii.top_right,
+            ascii.bottom_left,
+            ascii.bottom_right,
+            ascii.vertical_left,
+            ascii.vertical_right,
+            ascii.horizontal_top,
+            ascii.horizontal_bottom,
+        ];
+        for glyph in glyphs {
+            assert!(glyph.is_ascii(), "{glyph:?} is not ASCII");
+        }
+        assert_eq!(
+            (ascii.top_left, ascii.vertical_left, ascii.horizontal_top),
+            ("+", "|", "-")
+        );
+        // The separators follow the same switch.
+        assert_eq!(Glyphs::ascii().separator, "|");
+        assert_eq!(Glyphs::unicode().separator, "·");
+    }
+
     #[test]
     fn the_glyph_set_is_exactly_this() {
         assert_eq!(

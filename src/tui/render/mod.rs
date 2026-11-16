@@ -825,12 +825,17 @@ mod tests {
         let theme = Theme::new(true, true);
         let frame = render_with(&theme, 72, 14, &todo, &app);
         assert_snapshot("ascii", ASCII, frame.clone());
-        // `GRC_ASCII` covers the data glyphs — checkboxes, folds, the selection
-        // marker, the ellipsis, the scrollbar — not the box-drawing chrome,
-        // which every terminal that can run a TUI draws.
+        // `GRC_ASCII` covers the data glyphs, the box-drawing borders and the
+        // hint separators, so no cell of the frame needs a Unicode font.
+        assert!(frame.is_ascii(), "GRC_ASCII left a non-ASCII cell: {frame}");
         assert!(frame.contains("[ ]") && frame.contains("[x]"));
         assert!(frame.contains("|v Work"), "the fold and gutter markers");
-        for glyph in ['□', '✓', '▾', '▌', '…', '›', '█'] {
+        assert!(frame.contains("+ Sections"), "the border: {frame}");
+        assert!(frame.contains("j/k move  |  x toggle"), "the separator");
+        for glyph in [
+            '\u{25a1}', '\u{2713}', '\u{25be}', '\u{258c}', '\u{2026}', '\u{203a}', '\u{2588}',
+            '\u{00b7}', '\u{256d}', '\u{2500}',
+        ] {
             assert!(!frame.contains(glyph), "{glyph} survived GRC_ASCII");
         }
     }

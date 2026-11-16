@@ -73,8 +73,8 @@ so a transparent or translucent terminal profile keeps working. The selection
 bar and popups are always painted, because text on them has to be readable
 whatever is behind it. Set `GRC_BG=1` to fill the canvas with the dark panel
 colour instead, `NO_COLOR=1` to drop all colour and inherit the terminal's, and
-`GRC_ASCII=1` for ASCII checkboxes (`[ ]` / `[x]`), fold markers (`>` / `v`),
-and scrollbars. Without colour the selected row is marked by the `▌` gutter bar
+`GRC_ASCII=1` for an all-ASCII interface: checkboxes (`[ ]` / `[x]`), fold
+markers (`>` / `v`), scrollbars, `+ - |` borders, and `|` separators. Without colour the selected row is marked by the `▌` gutter bar
 and bold text. None of these change the file format.
 
 Colour depth follows `COLORTERM`: with `COLORTERM=truecolor` (or `24bit`) `grc`
