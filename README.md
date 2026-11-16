@@ -122,18 +122,19 @@ ignore it.
 | `j` / `k`, `Esc` / `q` / `?` | Scroll / close the help overlay |
 | `r` / `o` | On an external-change conflict: reload / overwrite |
 
+The filter is an append-only prompt: `Backspace` removes the last character.
+Text inputs (task, section, due date) use the full cursor editor above.
+When editing a task, a parseable `due:` token is highlighted and its resolved
+date previewed inline; an invalid token is shown in red and never clears the
+existing date. With a filter set, `Esc` clears the filter before it returns to
+the sections panel.
+
 ### Mouse
 
 Mouse capture is always on. The wheel moves the selection in the focused panel
 (it scrolls the help overlay while that is open), and a left click focuses the
 clicked panel and selects the row under the cursor, honouring any scrolling.
 Clicking outside the help overlay closes it.
-
-The filter is an append-only prompt: `Backspace` removes the last character.
-Text inputs (task, section, due date) use the full cursor editor above.
-When editing a task, a parseable `due:` token is highlighted and its resolved
-date previewed inline; an invalid token is shown in red and never clears the
-existing date.
 
 ## Due Date Shortcuts
 
