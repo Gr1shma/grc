@@ -139,7 +139,10 @@ ignore it.
 | `r` / `o` | On an external-change conflict: reload / overwrite |
 
 The filter is an append-only prompt: `Backspace` removes the last character.
-Text inputs (task, section, due date) use the full cursor editor above.
+Text inputs (task, section, due date) use the full cursor editor above, and in
+all of them `Enter` on an empty field closes the editor: for a task or a section
+that cancels the input (the status bar says why), and for a due date it clears
+the date. `Esc` always cancels.
 When editing a task, a parseable `due:` token is highlighted and its resolved
 date previewed inline; an invalid token is shown in red and never clears the
 existing date. With a filter set, `Esc` clears the filter before it returns to

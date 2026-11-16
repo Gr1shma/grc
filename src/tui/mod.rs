@@ -185,6 +185,11 @@ fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, event: Mou
         handle_help_mouse(app, area, kind, column, row);
         return;
     }
+    // A conflict has to be resolved, not navigated: only `r` and `o` mean
+    // anything until the file is back in sync with the screen.
+    if matches!(app.mode, Mode::Conflict) {
+        return;
+    }
     if app.mode.is_text_input() {
         app.clear_pending();
         return;
@@ -373,6 +378,32 @@ mod tests {
         assert_eq!(app.focus, Focus::Left);
         handle_click(&mut app, &todo, area, left.width, 1);
         assert_eq!(app.focus, Focus::Right);
+    }
+
+    #[test]
+    fn conflict_mode_ignores_the_mouse_until_it_is_resolved() {
+        let (todo, mut app) = state_with_tasks(5);
+        app.mode = Mode::Conflict;
+        app.focus = Focus::Right;
+        app.right_state.select(Some(2));
+
+        let area = click_area();
+        let mouse = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        for event in [
+            mouse(MouseEventKind::ScrollDown, 5, 3),
+            mouse(MouseEventKind::ScrollUp, 5, 3),
+            mouse(MouseEventKind::Down(MouseButton::Left), 30, 2),
+        ] {
+            handle_mouse(&mut app, &todo, area, event);
+        }
+        assert_eq!(app.mode, Mode::Conflict);
+        assert_eq!(app.focus, Focus::Right);
+        assert_eq!(app.right_state.selected(), Some(2));
     }
 
     #[test]

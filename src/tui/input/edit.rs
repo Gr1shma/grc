@@ -229,4 +229,36 @@ mod tests {
         assert_eq!(engine.todo_list.sections[0].name, "main");
         assert_eq!(engine.todo_list.sections[1].name, "next");
     }
+
+    #[test]
+    fn an_empty_input_cancels_the_editor_except_for_a_due_date() {
+        let (_dir, mut engine) = engine("# main\n- [ ] Task due:2025-06-15\n");
+
+        // Task text: empty cancels, the document is untouched, and the editor
+        // closes whether the message is an error or not.
+        engine.app.focus = crate::tui::state::Focus::Right;
+        engine.app.right_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('o'));
+        press(&mut engine, KeyCode::Enter);
+        assert_eq!(engine.app.mode, Mode::Normal);
+        assert_eq!(engine.todo_list.sections[0].tasks.len(), 1);
+
+        // Section name: the same.
+        engine.app.focus = crate::tui::state::Focus::Left;
+        press(&mut engine, KeyCode::Char('o'));
+        press(&mut engine, KeyCode::Enter);
+        assert_eq!(engine.app.mode, Mode::Normal);
+        assert_eq!(engine.todo_list.sections.len(), 1);
+
+        // Due date: empty is the one editor where Enter means something.
+        engine.app.focus = crate::tui::state::Focus::Right;
+        engine.app.right_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('t'));
+        if let Mode::InputDue(input) = &mut engine.app.mode {
+            input.field = TextField::new("");
+        }
+        press(&mut engine, KeyCode::Enter);
+        assert_eq!(engine.app.mode, Mode::Normal);
+        assert_eq!(engine.todo_list.sections[0].tasks[0].due, None);
+    }
 }
