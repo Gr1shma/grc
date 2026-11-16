@@ -9,6 +9,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType, Borders};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Border style used by every panel and dialog in the interface.
 pub const BORDER_TYPE: BorderType = BorderType::Rounded;
@@ -32,12 +33,19 @@ pub fn panel<'a>(theme: &Theme, title: &str, focused: bool) -> Block<'a> {
         .style(theme.panel_style())
 }
 
-/// Number of terminal cells a string occupies in the common case.
+/// Number of terminal cells `text` occupies.
 ///
-/// The UI uses single-width Latin glyphs for its chrome; task text is measured
-/// in characters, which is exact for the ASCII-heavy Markdown this app targets.
+/// Counting characters is wrong for anything outside Latin-1: a CJK ideograph
+/// is two cells and a combining mark is none, so a row measured in characters
+/// overflows its panel or leaves a ragged gap. `unicode-width` follows
+/// Unicode's East Asian Width so the arithmetic matches the terminal.
 pub fn display_width(text: &str) -> usize {
-    text.chars().count()
+    UnicodeWidthStr::width(text)
+}
+
+/// Cells one character occupies (0 for combining marks, 2 for wide glyphs).
+fn char_width(character: char) -> usize {
+    UnicodeWidthChar::width(character).unwrap_or(0)
 }
 
 /// Split `text` at a character index, clamping out-of-range values.
@@ -49,21 +57,30 @@ pub fn split_at_char(text: &str, char_idx: usize) -> (&str, &str) {
     text.split_at(byte)
 }
 
-/// Keep at most `width` characters.
+/// Keep the longest prefix of `text` that fits in `width` terminal cells.
+///
+/// A double-width character that would straddle the boundary is dropped rather
+/// than half-drawn, so the result can be one cell narrower than `width`.
 pub fn truncate(text: &str, width: usize) -> String {
-    text.chars().take(width).collect()
+    let mut used = 0;
+    let mut end = 0;
+    for (index, character) in text.char_indices() {
+        let cells = char_width(character);
+        if used + cells > width {
+            break;
+        }
+        used += cells;
+        end = index + character.len_utf8();
+    }
+    text[..end].to_string()
 }
 
-/// Truncate to `width` characters, using `ellipsis` when text is removed.
+/// Truncate to `width` terminal cells, using `ellipsis` when text is removed.
 pub fn truncate_ellipsis(text: &str, width: usize, ellipsis: &str) -> String {
-    let count = text.chars().count();
-    if count <= width {
+    if display_width(text) <= width {
         return text.to_string();
     }
-    if width == 0 {
-        return String::new();
-    }
-    let marker = ellipsis.chars().count();
+    let marker = display_width(ellipsis);
     if width <= marker {
         return truncate(text, width);
     }
@@ -122,4 +139,56 @@ pub const fn border_scrollbar(area: Rect) -> Rect {
         return Rect::new(area.x, area.y, 0, 0);
     }
     Rect::new(area.x + area.width - 1, area.y + 1, 1, area.height - 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_is_measured_in_terminal_cells() {
+        assert_eq!(display_width(""), 0);
+        assert_eq!(display_width("ascii"), 5);
+        // A CJK ideograph is two cells wide.
+        assert_eq!(display_width("日本語"), 6);
+        assert_eq!(display_width("a日本"), 5);
+        // A combining mark adds no cells of its own.
+        assert_eq!(display_width("e\u{301}"), 1);
+        assert_eq!(display_width("e\u{301}e\u{301}"), 2);
+        // A pictograph with emoji presentation is two cells.
+        assert_eq!(display_width("🦀"), 2);
+    }
+
+    #[test]
+    fn truncation_never_splits_a_wide_character() {
+        assert_eq!(truncate("日本語", 6), "日本語");
+        assert_eq!(truncate("日本語", 5), "日本");
+        assert_eq!(truncate("日本語", 3), "日");
+        assert_eq!(truncate("日x", 2), "日");
+        assert_eq!(truncate("x日", 1), "x");
+        assert_eq!(truncate("日本語", 0), "");
+    }
+
+    #[test]
+    fn truncation_keeps_a_combining_mark_with_its_base() {
+        assert_eq!(truncate("e\u{301}xy", 1), "e\u{301}");
+        assert_eq!(truncate("e\u{301}xy", 2), "e\u{301}x");
+        assert_eq!(truncate("e\u{301}xy", 0), "");
+    }
+
+    #[test]
+    fn ellipsis_truncation_counts_cells() {
+        assert_eq!(truncate_ellipsis("日本語", 6, "…"), "日本語");
+        assert_eq!(truncate_ellipsis("日本語", 5, "…"), "日本…");
+        assert_eq!(truncate_ellipsis("日本語", 4, "…"), "日…");
+        assert_eq!(truncate_ellipsis("日本語", 3, "…"), "日…");
+        // No room for the marker itself: show what fits and no marker.
+        assert_eq!(truncate_ellipsis("日本語", 2, "…"), "…");
+        assert_eq!(truncate_ellipsis("日本語", 1, "…"), "");
+        assert_eq!(truncate_ellipsis("日本語", 0, "…"), "");
+        // The ASCII marker costs three cells, so it is dropped sooner.
+        assert_eq!(truncate_ellipsis(" 영어", 3, "..."), " 영");
+        assert_eq!(truncate_ellipsis("英語", 3, "..."), "英");
+        assert_eq!(truncate_ellipsis("abcdef", 5, "..."), "ab...");
+    }
 }

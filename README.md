@@ -55,8 +55,10 @@ name. A message clears itself after about three seconds, or as soon as the next
 key is pressed. Due dates are right-aligned and coloured by urgency; completed tasks are
 dimmed and struck through. A scrollbar appears at the panel's right edge only
 when its content overflows. Long task text is cut with `…` before the due
-column, and a row that is too narrow for its `Section ›` breadcrumb drops the
-breadcrumb rather than the task text.
+column; a row that is too narrow for its `Section ›` breadcrumb drops the
+breadcrumb first, and one that cannot also hold the date drops the date rather
+than showing half of it. Widths are measured in terminal cells, so CJK text,
+emoji and combining marks line up instead of overflowing the panel.
 
 ### Selection and colour
 

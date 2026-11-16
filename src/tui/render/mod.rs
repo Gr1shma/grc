@@ -102,6 +102,7 @@ mod tests {
     use crate::tui::task_ref::TaskRef;
     use crate::tui::theme::contrast::{DECOR_MIN, TEXT_MIN, ratio};
     use crate::tui::tree::build_visible_tree_items;
+    use crate::tui::widgets::display_width;
     use chrono::NaiveDate;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -617,6 +618,147 @@ mod tests {
                     buffer[(x, y)].bg,
                     theme.surface,
                     "({x},{y}) let the panel show through the popup"
+                );
+            }
+        }
+    }
+
+    /// Draw one panel row as a string, borders excluded.
+    ///
+    /// A double-width glyph also owns the cell after it, which the test backend
+    /// leaves blank; the assertions below only look for text that is present.
+    fn inner_row(buffer: &Buffer, panel: Rect, row: u16) -> String {
+        (panel.x + 1..panel.x + panel.width - 1)
+            .map(|x| buffer[(x, row)].symbol())
+            .collect()
+    }
+
+    /// Wide and combining text must be measured in cells, not characters.
+    ///
+    /// Each string is long enough to need cutting at both widths. Counting
+    /// characters instead of cells lets the text take twice the cells it was
+    /// allotted, so the truncation marker lands past the panel edge and the row
+    /// is clipped mid-glyph instead of ending in its padding.
+    #[test]
+    fn wide_text_fits_the_width_the_layout_gave_it() {
+        let ellipsis = Theme::plain().glyphs.ellipsis;
+        let cjk = "日本語のタスクです日本語のタスクです";
+        let emoji = "🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀🦀";
+        let combining = "e\u{301}".repeat(24);
+        assert_eq!(display_width(&combining), 24);
+        for text in [cjk, emoji, combining.as_str()] {
+            let todo = parse_str(&format!("# Work\n- [ ] {text}\n"));
+            for width in [20u16, 40] {
+                let mut app = AppState::new_with_today(1, TODAY);
+                app.focus = Focus::Right;
+                prepare(&mut app, &todo);
+                let buffer = cells(width, 10, &todo, &app, &Theme::plain());
+                let [_, right] = panel_split(Rect::new(0, 0, width, 8));
+                let row = inner_row(&buffer, right, 1);
+                assert!(
+                    row.contains(ellipsis),
+                    "width {width} {text:?} was not cut: {row:?}"
+                );
+                assert!(
+                    row.ends_with(' '),
+                    "width {width} {text:?} filled the panel: {row:?}"
+                );
+                assert!(
+                    row.trim_end().ends_with(ellipsis),
+                    "width {width} {text:?} lost the marker: {row:?}"
+                );
+            }
+        }
+        // A combining mark may only follow its own base character, even at the
+        // cut; no row may start with one.
+        let todo = parse_str(&format!("# Work\n- [ ] {combining}\n"));
+        let mut app = AppState::new_with_today(1, TODAY);
+        app.focus = Focus::Right;
+        prepare(&mut app, &todo);
+        let buffer = cells(20, 10, &todo, &app, &Theme::plain());
+        let [_, right] = panel_split(Rect::new(0, 0, 20, 8));
+        let row = inner_row(&buffer, right, 1);
+        assert!(row.contains("e\u{301}"), "a mark lost its base: {row:?}");
+    }
+
+    #[test]
+    fn a_wide_task_text_keeps_the_date_inside_the_panel() {
+        let ellipsis = Theme::plain().glyphs.ellipsis;
+        let todo = parse_str("# Work\n- [ ] 日本語のタスクです due:2027-03-01\n");
+        for width in [20u16, 40] {
+            let mut app = AppState::new_with_today(1, TODAY);
+            app.focus = Focus::Right;
+            prepare(&mut app, &todo);
+            let buffer = cells(width, 10, &todo, &app, &Theme::plain());
+            let [_, right] = panel_split(Rect::new(0, 0, width, 8));
+            let row = inner_row(&buffer, right, 1);
+            assert!(
+                row.contains(ellipsis),
+                "width {width}: the text has to give way: {row:?}"
+            );
+            if width == 40 {
+                assert!(
+                    row.trim_end().ends_with("Mar 1, 2027"),
+                    "width {width}: date clipped: {row:?}"
+                );
+            } else {
+                // No room for both: the date is dropped whole, never clipped.
+                assert!(!row.contains("Mar"), "half a date on screen: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_section_name_is_cut_to_the_tree_which_fits_it() {
+        let ellipsis = Theme::plain().glyphs.ellipsis;
+        let todo = parse_str("# 日本語のセクションです\n- [ ] task\n");
+        let mut app = AppState::new_with_today(1, TODAY);
+        prepare(&mut app, &todo);
+        let buffer = cells(40, 10, &todo, &app, &Theme::plain());
+        let [left, _] = panel_split(Rect::new(0, 0, 40, 8));
+        let row = inner_row(&buffer, left, 1);
+        // A double-width glyph also owns the cell after it, so the two
+        // ideographs are not adjacent in the buffer's symbols.
+        assert!(
+            row.contains('日') && row.contains('本'),
+            "the name starts the row: {row:?}"
+        );
+        assert!(
+            row.trim_end().ends_with(ellipsis),
+            "the name has to be cut inside the tree: {row:?}"
+        );
+    }
+
+    #[test]
+    fn the_edit_cursor_sits_after_the_cells_it_precedes() {
+        use crate::tui::widgets::GUTTER;
+        let todo = parse_str("# Work\n- [ ] 日本語\n");
+        for width in [20u16, 40] {
+            for cursor in 0..=3 {
+                let mut app = AppState::new_with_today(1, TODAY);
+                app.focus = Focus::Right;
+                app.mode = Mode::InputTask(TaskInput {
+                    editing_idx: Some(0),
+                    insert_idx: None,
+                    above: false,
+                    node: vec![0],
+                    field: TextField {
+                        buf: "日本語".into(),
+                        cursor,
+                    },
+                });
+                prepare(&mut app, &todo);
+                let theme = Theme::plain();
+                let buffer = cells(width, 10, &todo, &app, &theme);
+                let [_, right] = panel_split(Rect::new(0, 0, width, 8));
+                // Border, gutter, checkbox glyph, one space.
+                let text_start = right.x + 1 + GUTTER as u16 + 1 + 1;
+                let before: String = "日本語".chars().take(cursor).collect();
+                let expected = text_start + display_width(&before) as u16;
+                assert_eq!(
+                    buffer[(expected, 1)].symbol(),
+                    theme.glyphs.cursor,
+                    "width {width} cursor {cursor}"
                 );
             }
         }

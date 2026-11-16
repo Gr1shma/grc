@@ -92,7 +92,7 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
                         truncate_ellipsis(&section.name, name_room, row.glyphs().ellipsis)
                     };
                     let name_width = if renaming {
-                        rename_field.map_or(0, |field| field.buf.chars().count() + 1)
+                        rename_field.map_or(0, |field| display_width(&field.buf) + 1)
                     } else {
                         display_width(&display_name)
                     };

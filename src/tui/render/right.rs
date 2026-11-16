@@ -156,21 +156,29 @@ fn task_item(
     ];
     let mut used = GUTTER + display_width(glyph) + 1;
 
-    let due = task.due.map(|date| {
+    let mut due = task.due.map(|date| {
         (
             format_due(date, ctx.today),
             row.due(due_urgency(task.is_done, date, ctx.today)),
         )
     });
-    let due_width = due.as_ref().map_or(0, |(label, _)| display_width(label));
+    let mut due_width = due.as_ref().map_or(0, |(label, _)| display_width(label));
 
     let mut breadcrumb = task_ref
         .sub_name
         .as_ref()
         .map(|name| format!("{name} {} ", row.glyphs().breadcrumb_sep));
-    let breadcrumb_width = breadcrumb.as_ref().map(|text| display_width(text));
+    let mut breadcrumb_width = breadcrumb.as_ref().map(|text| display_width(text));
+    // The breadcrumb and the date are the least important cells on the row.
+    // Drop either rather than draw half of it: a clipped date is worse than no
+    // date, and the text is what identifies the task.
     if text_room(ctx, used, breadcrumb_width, due_width) < MIN_TEXT_WIDTH {
         breadcrumb = None;
+        breadcrumb_width = None;
+    }
+    if due_width > 0 && text_room(ctx, used, breadcrumb_width, due_width) < MIN_TEXT_WIDTH {
+        due = None;
+        due_width = 0;
     }
     if let Some(breadcrumb) = breadcrumb {
         used += display_width(&breadcrumb);
@@ -269,7 +277,7 @@ fn due_editing_item(
         row,
     );
     let suffix_width =
-        display_width(prefix) + field.buf.chars().count() + 1 + display_width(&preview_text);
+        display_width(prefix) + display_width(&field.buf) + 1 + display_width(&preview_text);
 
     let mut breadcrumb = sub_name.map(|name| format!("{name} {} ", row.glyphs().breadcrumb_sep));
     let breadcrumb_width = breadcrumb.as_ref().map(|text| display_width(text));
