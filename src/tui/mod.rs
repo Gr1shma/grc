@@ -32,6 +32,7 @@ use std::io::{self, Stdout};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Width of the section panel as a percentage of terminal width.
 pub const LEFT_PANEL_PERCENT: u16 = 27;
@@ -179,17 +180,37 @@ enum Wake {
     Tick,
 }
 
-/// Wait for input, ticking the status-message clock while waiting.
+/// How long the event loop sleeps when there is no message to expire.
 ///
-/// `event::read` would block forever, so a message would stay in the status bar
-/// until the next key. Polling with a timeout instead lets it expire on its own;
-/// the timer is a counter in [`AppState`], not a thread.
+/// A safety net rather than a tick: with nothing pending the loop blocks until
+/// a key, mouse event or resize arrives, so an idle `grc` uses no CPU.
+const IDLE_POLL: Duration = Duration::from_secs(3600);
+
+/// How long the next `poll` may block: exactly until the showing message
+/// expires, or [`IDLE_POLL`] when there is none.
+fn poll_timeout(app: &AppState) -> Duration {
+    app.message_timeout().unwrap_or(IDLE_POLL)
+}
+
+/// Wait for input, waking once when the status message expires.
+///
+/// `event::read` would block until the next key, so a message would stay in the
+/// status bar forever; a fixed poll interval would wake up four times a second
+/// for nothing. Blocking until whichever comes first — an event or the message
+/// deadline — does both jobs with no idle wake-ups.
 fn wait_for_input(app: &mut AppState) -> Result<Wake> {
+    if app.advance(Instant::now()) {
+        return Ok(Wake::Tick);
+    }
     loop {
-        if event::poll(state::MESSAGE_TICK)? {
-            return Ok(Wake::Event(event::read()?));
+        if event::poll(poll_timeout(app))? {
+            let event = event::read()?;
+            // Record when the event happened, so a message it triggers counts
+            // its three seconds from now rather than from the last wake-up.
+            app.advance(Instant::now());
+            return Ok(Wake::Event(event));
         }
-        if app.tick() {
+        if app.advance(Instant::now()) {
             return Ok(Wake::Tick);
         }
     }
@@ -370,6 +391,27 @@ mod tests {
             app.hide_done,
         );
         (todo, app)
+    }
+
+    #[test]
+    fn the_loop_blocks_until_the_next_message_deadline() {
+        let mut app = AppState::new(1);
+        let start = Instant::now();
+        app.advance(start);
+        // Nothing to expire: sleep until an event arrives.
+        assert_eq!(poll_timeout(&app), IDLE_POLL);
+        assert!(
+            IDLE_POLL >= Duration::from_secs(60),
+            "a short idle timeout would wake the loop for nothing"
+        );
+
+        app.set_info("saved");
+        let timeout = poll_timeout(&app);
+        assert!(timeout > Duration::ZERO && timeout <= state::MESSAGE_TTL);
+
+        app.advance(start + state::MESSAGE_TTL);
+        assert!(app.message.is_none());
+        assert_eq!(poll_timeout(&app), IDLE_POLL);
     }
 
     #[test]

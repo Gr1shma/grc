@@ -11,7 +11,7 @@ use crate::tui::task_ref::TaskRef;
 use chrono::{Local, NaiveDate};
 use ratatui::widgets::ListState;
 use std::collections::HashSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Which panel receives navigation keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,11 +58,8 @@ pub enum PendingKey {
     Overdue,
 }
 
-/// How long the event loop waits before ticking the message timer.
-pub const MESSAGE_TICK: Duration = Duration::from_millis(250);
-
-/// Ticks a status message stays on screen: about three seconds.
-pub const MESSAGE_TICKS: u8 = 12;
+/// How long a status message stays on screen.
+pub const MESSAGE_TTL: Duration = Duration::from_secs(3);
 
 /// Severity of a transient status-bar message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -253,9 +250,13 @@ pub struct AppState {
     pub today: NaiveDate,
     /// Transient message shown on the next rendered status bar.
     pub message: Option<Message>,
-    /// Ticks `message` has been on screen; the clock is driven by the event
-    /// loop's poll timeout, so no thread is involved.
-    message_age: u8,
+    /// When `message` should disappear. No thread is involved: the event loop
+    /// sleeps in `poll` until exactly this deadline (or until a key arrives)
+    /// and then clears the message, so an idle screen costs no wake-ups.
+    message_deadline: Option<Instant>,
+    /// Last time the event loop told us. Injected rather than read so the
+    /// expiry rules can be tested without sleeping.
+    clock: Instant,
     /// Last known terminal height, used for bounded help scrolling.
     pub viewport_height: u16,
 }
@@ -293,7 +294,8 @@ impl AppState {
             hide_done: false,
             today,
             message: None,
-            message_age: 0,
+            message_deadline: None,
+            clock: Instant::now(),
             viewport_height: 24,
         }
     }
@@ -336,29 +338,38 @@ impl AppState {
     /// Show a message, restarting its countdown.
     pub fn set_message(&mut self, message: Message) {
         self.message = Some(message);
-        self.message_age = 0;
+        self.message_deadline = Some(self.clock + MESSAGE_TTL);
     }
 
     /// Clear the current status message.
     pub fn clear_message(&mut self) {
         self.message = None;
-        self.message_age = 0;
+        self.message_deadline = None;
     }
 
-    /// Advance the status-message clock by one tick.
+    /// How long until the showing message expires.
+    ///
+    /// `None` when nothing is showing; the event loop then blocks until input
+    /// arrives instead of waking up to check a timer.
+    pub fn message_timeout(&self) -> Option<Duration> {
+        self.message_deadline
+            .map(|deadline| deadline.saturating_duration_since(self.clock))
+    }
+
+    /// Move the clock to `now`, clearing the message if its time is up.
     ///
     /// Returns whether the message disappeared, so the caller can repaint only
     /// when there is something new to show.
-    pub fn tick(&mut self) -> bool {
-        if self.message.is_none() {
-            return false;
+    pub fn advance(&mut self, now: Instant) -> bool {
+        self.clock = now;
+        if self
+            .message_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.clear_message();
+            return true;
         }
-        self.message_age = self.message_age.saturating_add(1);
-        if self.message_age < MESSAGE_TICKS {
-            return false;
-        }
-        self.clear_message();
-        true
+        false
     }
 
     /// Clear the active filter.
@@ -432,28 +443,51 @@ mod tests {
     }
 
     #[test]
-    fn a_message_expires_after_its_ticks() {
+    fn a_message_expires_after_its_ttl() {
+        let start = Instant::now();
         let mut app = AppState::new(0);
+        app.advance(start);
         app.set_info("saved");
-        for _ in 0..MESSAGE_TICKS - 1 {
-            assert!(!app.tick(), "the message is still on screen");
-            assert!(app.message.is_some());
-        }
-        assert!(app.tick(), "the last tick clears the message");
+        assert_eq!(app.message_timeout(), Some(MESSAGE_TTL));
+
+        assert!(
+            !app.advance(start + MESSAGE_TTL - Duration::from_millis(1)),
+            "the message is still on screen"
+        );
+        assert!(app.message.is_some());
+        assert!(app.advance(start + MESSAGE_TTL), "the deadline clears it");
         assert!(app.message.is_none());
-        assert!(!app.tick(), "nothing left to clear");
+        assert_eq!(app.message_timeout(), None);
+        assert!(!app.advance(start + MESSAGE_TTL), "nothing left to clear");
     }
 
     #[test]
     fn a_new_message_restarts_the_countdown() {
+        let start = Instant::now();
         let mut app = AppState::new(0);
+        app.advance(start);
         app.set_error("save failed");
-        for _ in 0..MESSAGE_TICKS - 1 {
-            app.tick();
-        }
+        app.advance(start + MESSAGE_TTL - Duration::from_millis(1));
         app.set_error("save failed again");
-        assert!(!app.tick());
+        assert!(!app.advance(start + MESSAGE_TTL));
         assert!(app.message.is_some(), "the countdown started over");
+        assert!(app.advance(start + 2 * MESSAGE_TTL), "and ends on its own");
+    }
+
+    #[test]
+    fn nothing_on_screen_means_no_deadline() {
+        let mut app = AppState::new(0);
+        app.advance(Instant::now());
+        assert_eq!(app.message_timeout(), None);
+        app.set_info("saved");
+        app.clear_message();
+        assert_eq!(app.message_timeout(), None);
+        // A clock that went backwards must not produce a panic or a negative
+        // wait; the message simply stays until it is due.
+        app.set_info("saved");
+        let earlier = Instant::now() - Duration::from_secs(1);
+        app.advance(earlier);
+        assert!(app.message_timeout().is_some_and(|wait| wait > MESSAGE_TTL));
     }
 
     #[test]
