@@ -237,8 +237,13 @@ fn due_editing_item(
         None if field.buf.trim().is_empty() => ctx.theme.dim_style(),
         None => ctx.theme.error_style(),
     };
-    let (preview_text, preview_style) =
-        due_preview_text(parsed, field.buf.trim().is_empty(), ctx.today, ctx.theme);
+    let (preview_text, preview_style) = due_preview_text(
+        parsed,
+        field.buf.trim().is_empty(),
+        task.due.is_some(),
+        ctx.today,
+        ctx.theme,
+    );
     let suffix_width =
         display_width(prefix) + field.buf.chars().count() + 1 + display_width(&preview_text);
     let text_room = ctx.width.saturating_sub(used + suffix_width + 1);
@@ -463,6 +468,7 @@ fn cursor_span(theme: &Theme) -> Span<'static> {
 fn due_preview_text(
     parsed: Option<NaiveDate>,
     empty: bool,
+    had_date: bool,
     today: NaiveDate,
     theme: &Theme,
 ) -> (String, Style) {
@@ -475,8 +481,13 @@ fn due_preview_text(
             format!("  {} cleared", theme.glyphs.preview),
             theme.dim_style(),
         ),
-        None => (
+        // "old date kept" is only true when this task already had one.
+        None if had_date => (
             format!("  {} invalid — old date kept", theme.glyphs.invalid_due),
+            theme.error_style(),
+        ),
+        None => (
+            format!("  {} invalid date", theme.glyphs.invalid_due),
             theme.error_style(),
         ),
     }
@@ -573,6 +584,19 @@ mod tests {
             urgency_for_date(NaiveDate::from_ymd_opt(2025, 8, 1).unwrap(), today()),
             DueUrgency::Later
         );
+    }
+
+    #[test]
+    fn due_preview_only_mentions_a_kept_date_when_there_was_one() {
+        let theme = Theme::plain();
+        let (kept, _) = due_preview_text(None, false, true, today(), &theme);
+        assert!(kept.contains("old date kept"));
+        let (first, _) = due_preview_text(None, false, false, today(), &theme);
+        assert!(!first.contains("kept"));
+        assert!(first.contains("invalid date"));
+
+        let (cleared, _) = due_preview_text(None, true, true, today(), &theme);
+        assert!(cleared.contains("cleared"));
     }
 
     #[test]
