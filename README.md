@@ -52,8 +52,9 @@ Press `?` inside the app to open the full help overlay.
 | `t` | Set due date (empty to clear) |
 | `x` / `Space` | Toggle done |
 | `dd` | Delete |
-| `yy` / `p` | Yank / paste |
+| `yy` / `p` / `P` | Yank / paste below / paste above |
 | `gg` / `G` | Jump top / bottom |
+| `:` | Sort tasks by due date (task panel) |
 | `q` | Quit |
 
 ## Due Date Shortcuts
@@ -70,7 +71,7 @@ When setting a due date with `t`, you can type any of:
 | `sun`/`mon`/.../`sat` | Next occurrence of that weekday (also full names) |
 | `next mon` `next monday` | Next occurrence of that weekday |
 | `this monday` | This/next occurrence of that weekday |
-| `+3d` `-2d` `+2w` `+1m` `+1y` | Relative offset (days/weeks/months/years) |
+| `+3d` `-2d` `+2w` `+1m` `+1y` | Relative offset (days/weeks/calendar months/years) |
 | `in 3 days` `in 2 weeks` | Relative offset (also months/years) |
 | `jun 15` `june 15` | Month name + day (current year, next year if passed) |
 
@@ -85,9 +86,11 @@ Call mom due:in 3 days
 Pay rent due:2025/06/15
 ```
 
+Only a parseable date is removed. Unrecognized `due:` text is left as part of the task.
+
 ## File Format
 
-Plain Markdown — edit it directly in any editor:
+Plain Markdown — edit it directly in any editor. Lines that `grc` does not recognize (prose, comments, blank lines) are preserved when the file is saved.
 
 ```markdown
 # work
