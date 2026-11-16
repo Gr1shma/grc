@@ -20,7 +20,7 @@ use crate::tui::state::{AppState, Focus, Mode};
 use crate::tui::task_ref::get_task_refs_filtered;
 use crate::tui::tree::{clamp_right_selection, selected_node};
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{self, Event, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
@@ -150,7 +150,9 @@ fn run_engine(terminal: &mut Terminal<CrosstermBackend<Stdout>>, path: &Path) ->
 
         match event::read()? {
             Event::Key(key) => {
-                if engine.handle_key(key.code, key.modifiers) == engine::Control::Quit {
+                if is_action_key(key.kind)
+                    && engine.handle_key(key.code, key.modifiers) == engine::Control::Quit
+                {
                     break;
                 }
             }
@@ -163,6 +165,15 @@ fn run_engine(terminal: &mut Terminal<CrosstermBackend<Stdout>>, path: &Path) ->
         }
     }
     Ok(())
+}
+
+/// Whether a key event should run a command.
+///
+/// crossterm reports key releases as well as presses on some platforms
+/// (notably Windows). Acting on both would run every keybinding twice, so only
+/// presses and auto-repeats count.
+fn is_action_key(kind: KeyEventKind) -> bool {
+    kind != KeyEventKind::Release
 }
 
 fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, event: MouseEvent) {
@@ -326,6 +337,13 @@ mod tests {
             app.hide_done,
         );
         (todo, app)
+    }
+
+    #[test]
+    fn key_releases_do_not_run_commands_again() {
+        assert!(is_action_key(KeyEventKind::Press));
+        assert!(is_action_key(KeyEventKind::Repeat));
+        assert!(!is_action_key(KeyEventKind::Release));
     }
 
     #[test]
