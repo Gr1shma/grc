@@ -1,16 +1,54 @@
 //! Top-level layout and chrome.
 
 use crate::task::TodoList;
-use crate::tui::state::{AppState, Mode};
+use crate::tui::state::{AppState, Focus, Mode};
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{hint, status};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::widgets::Block;
 use std::path::Path;
 
 pub(crate) mod help;
 mod left;
 mod right;
+
+/// Which of the two panels a piece of logic refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    /// Section tree on the left.
+    Left,
+    /// Task list on the right.
+    Right,
+}
+
+impl Panel {
+    /// Whether this panel currently shows the focused chrome and the strong
+    /// selection bar.
+    ///
+    /// Shared with the tests so the strength of a selection bar can never
+    /// disagree with what was drawn. Editing a task keeps the task panel
+    /// focused; renaming a section keeps the tree focused.
+    pub fn is_focused(self, app: &AppState) -> bool {
+        match self {
+            Panel::Left => {
+                app.focus == Focus::Left
+                    && !matches!(
+                        app.mode,
+                        Mode::Help
+                            | Mode::Conflict
+                            | Mode::Filter
+                            | Mode::InputTask(_)
+                            | Mode::InputDue(_)
+                    )
+            }
+            Panel::Right => {
+                matches!(app.mode, Mode::InputTask(_) | Mode::InputDue(_))
+                    || (app.focus == Focus::Right && matches!(app.mode, Mode::Normal))
+            }
+        }
+    }
+}
 
 /// Horizontal split between the section tree and the task panel.
 ///
@@ -31,6 +69,10 @@ pub fn panel_split(area: Rect) -> [Rect; 2] {
 /// Draw the whole interface from immutable state.
 pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Theme, path: &Path) {
     let area = f.area();
+    // The palette is defined against a fixed canvas, so paint it before any
+    // row: without this the selection tint would sit on the terminal's own
+    // background and every contrast guarantee would be void.
+    f.render_widget(Block::default().style(theme.base_style()), area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -52,15 +94,18 @@ pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Them
 }
 
 #[cfg(test)]
-mod snapshots {
+mod tests {
     use super::*;
     use crate::parser::parse_str;
-    use crate::tui::state::{AppState, DueInput, Focus, Mode, TextField};
+    use crate::tui::state::{AppState, DueInput, Focus, Mode, TaskInput, TextField};
     use crate::tui::task_ref::TaskRef;
+    use crate::tui::theme::contrast::{DECOR_MIN, TEXT_MIN, ratio};
     use crate::tui::tree::build_visible_tree_items;
     use chrono::NaiveDate;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::style::Color;
     use std::path::Path;
 
     const TODAY: NaiveDate = NaiveDate::from_ymd_opt(2026, 11, 16).unwrap();
@@ -75,13 +120,23 @@ mod snapshots {
         );
     }
 
-    fn render(width: u16, height: u16, todo: &TodoList, app: &AppState) -> String {
+    fn cells(width: u16, height: u16, todo: &TodoList, app: &AppState, theme: &Theme) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw_ui(frame, todo, app, &Theme::plain(), Path::new("/tmp/todo.md")))
+            .draw(|frame| draw_ui(frame, todo, app, theme, Path::new("/tmp/todo.md")))
             .unwrap();
-        let buffer = terminal.backend().buffer().clone();
+        terminal.backend().buffer().clone()
+    }
+
+    fn render_with(
+        theme: &Theme,
+        width: u16,
+        height: u16,
+        todo: &TodoList,
+        app: &AppState,
+    ) -> String {
+        let buffer = cells(width, height, todo, app, theme);
         let mut out = String::new();
         for y in 0..height {
             for x in 0..width {
@@ -92,6 +147,10 @@ mod snapshots {
             }
         }
         out
+    }
+
+    fn render(width: u16, height: u16, todo: &TodoList, app: &AppState) -> String {
+        render_with(&Theme::plain(), width, height, todo, app)
     }
 
     fn normal_state() -> (TodoList, AppState) {
@@ -258,5 +317,249 @@ mod snapshots {
         let tomorrow = render(72, 14, &todo, &app);
         assert_ne!(rendered, tomorrow);
         assert!(tomorrow.contains("yday"));
+    }
+
+    #[test]
+    fn long_rows_truncate_with_an_ellipsis_and_keep_the_due_column() {
+        let todo = parse_str(
+            "# Work\n- [ ] Ship a release that needs a much longer name due:today\n## Urgent\n- [ ] A subsection task with a very long name due:tomorrow\n",
+        );
+        for width in [40, 20] {
+            let mut app = AppState::new_with_today(2, TODAY);
+            app.focus = Focus::Right;
+            prepare(&mut app, &todo);
+            let buffer = cells(width, 14, &todo, &app, &Theme::plain());
+            let [_, right] = panel_split(Rect::new(0, 0, width, 12));
+            let rendered = render(width, 14, &todo, &app);
+            assert!(
+                rendered.contains('…'),
+                "width {width}: expected a truncated row:\n{rendered}"
+            );
+            // Every drawn row keeps its right border, and the due label stays
+            // whole: text is cut, the due column is not overwritten.
+            for row in 1..=4 {
+                let last = right.x + right.width - 1;
+                assert_eq!(
+                    buffer[(last, row)].symbol(),
+                    "│",
+                    "width {width} row {row}: panel border overwritten:\n{rendered}"
+                );
+            }
+            assert!(
+                rendered.contains("today") || rendered.contains("tmr"),
+                "width {width}: due column was squeezed out:\n{rendered}"
+            );
+        }
+    }
+
+    /// Draw the row `index` rows below a panel's top border.
+    fn drawn_row(buffer: &Buffer, panel: Rect, index: usize) -> Vec<ratatui::buffer::Cell> {
+        let y = panel.y + 1 + u16::try_from(index).unwrap();
+        (panel.x + 1..panel.x + panel.width - 1)
+            .map(|x| buffer[(x, y)].clone())
+            .collect()
+    }
+
+    /// Glyphs that decorate a row instead of carrying text.
+    fn is_decoration(theme: &Theme, symbol: &str) -> bool {
+        let glyphs = &theme.glyphs;
+        [
+            glyphs.tree_guide,
+            glyphs.fold_open,
+            glyphs.fold_closed,
+            glyphs.selection_marker,
+            glyphs.scroll_track,
+            glyphs.scroll_thumb,
+        ]
+        .contains(&symbol)
+    }
+
+    /// The property the old gray bar broke: every cell drawn on a row must be
+    /// legible against the background that cell actually landed on.
+    fn assert_row_is_legible(cells: &[ratatui::buffer::Cell], theme: &Theme, what: &str) {
+        for cell in cells {
+            assert_ne!(
+                cell.fg,
+                Color::DarkGray,
+                "{what}: {:?} kept the old gray foreground",
+                cell.symbol()
+            );
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            let minimum = if is_decoration(theme, cell.symbol()) {
+                DECOR_MIN
+            } else {
+                TEXT_MIN
+            };
+            let ratio = ratio(cell.fg, cell.bg);
+            assert!(
+                ratio >= minimum,
+                "{what}: {:?} {:?} on {:?} is {ratio:.2}:1, needs {minimum}:1",
+                cell.symbol(),
+                cell.fg,
+                cell.bg
+            );
+        }
+    }
+
+    fn selected_row_is_legible(
+        app: &AppState,
+        todo: &TodoList,
+        panel: Panel,
+        index: usize,
+        what: &str,
+    ) {
+        let theme = Theme::new(true, false);
+        let buffer = cells(72, 14, todo, app, &theme);
+        let area = panel_split(Rect::new(0, 0, 72, 12))[panel_index(panel)];
+        let cells = drawn_row(&buffer, area, index);
+        let expected = if panel.is_focused(app) {
+            theme.selection
+        } else {
+            theme.selection_unfocused
+        };
+        for cell in &cells {
+            assert_eq!(cell.bg, expected, "{what}: cell not on the selection bar");
+            // The colours chosen for the panel canvas are not all readable on
+            // the bar, so a selected row must never fall back to them.
+            assert_ne!(
+                cell.fg,
+                theme.dim,
+                "{what}: {:?} used the canvas secondary colour on the bar",
+                cell.symbol()
+            );
+            assert_ne!(
+                cell.fg,
+                theme.bg,
+                "{what}: {:?} is invisible on the bar",
+                cell.symbol()
+            );
+        }
+        assert_row_is_legible(&cells, &theme, what);
+    }
+
+    fn panel_index(panel: Panel) -> usize {
+        match panel {
+            Panel::Left => 0,
+            Panel::Right => 1,
+        }
+    }
+
+    /// A document with a done task, an overdue task, and a filter match.
+    fn selection_state() -> (TodoList, AppState) {
+        let todo = parse_str(
+            "# Work\n- [ ] Ship release due:today\n- [x] Write docs\n- [ ] Pay rent due:2026-11-09\n## Urgent\n- [ ] Fix bug\n",
+        );
+        let mut app = AppState::new_with_today(2, TODAY);
+        app.focus = Focus::Right;
+        prepare(&mut app, &todo);
+        (todo, app)
+    }
+
+    #[test]
+    fn the_selected_task_row_sits_on_the_selection_bar() {
+        let (todo, mut app) = selection_state();
+        // Every kind of task text a bar can carry: plain, done, overdue.
+        for (index, what) in [(0, "todo"), (1, "done task"), (2, "overdue task")] {
+            app.right_state.select(Some(index));
+            selected_row_is_legible(&app, &todo, Panel::Right, index, what);
+        }
+    }
+
+    #[test]
+    fn a_subsections_breadcrumb_stays_legible_on_the_bar() {
+        let (todo, mut app) = selection_state();
+        app.left_state.select(Some(1));
+        prepare(&mut app, &todo);
+        app.right_state.select(Some(0));
+        assert!(
+            render(72, 14, &todo, &app).contains('›'),
+            "expected a breadcrumb row"
+        );
+        selected_row_is_legible(&app, &todo, Panel::Right, 0, "breadcrumb");
+    }
+
+    #[test]
+    fn the_selected_section_row_is_legible_including_its_guides() {
+        let (todo, mut app) = selection_state();
+        app.focus = Focus::Left;
+        // Row 1 is the nested section, so its row carries a tree guide.
+        app.left_state.select(Some(1));
+        selected_row_is_legible(&app, &todo, Panel::Left, 1, "nested section");
+        app.left_state.select(Some(0));
+        selected_row_is_legible(&app, &todo, Panel::Left, 0, "top-level section");
+    }
+
+    #[test]
+    fn a_filter_match_on_the_selected_row_is_still_legible() {
+        let (todo, mut app) = selection_state();
+        app.set_filter("ship".into());
+        prepare(&mut app, &todo);
+        app.right_state.select(Some(0));
+        selected_row_is_legible(&app, &todo, Panel::Right, 0, "filter match");
+    }
+
+    #[test]
+    fn the_row_being_edited_is_legible_on_the_bar() {
+        let (todo, mut app) = selection_state();
+        app.mode = Mode::InputTask(TaskInput {
+            editing_idx: Some(0),
+            insert_idx: None,
+            above: false,
+            node: vec![0],
+            field: TextField::new("Ship release due:next fri"),
+        });
+        prepare(&mut app, &todo);
+        app.right_state.select(Some(0));
+        selected_row_is_legible(&app, &todo, Panel::Right, 0, "edited row");
+    }
+
+    #[test]
+    fn an_unfocused_panels_selection_is_weaker_but_still_legible() {
+        let (todo, mut app) = selection_state();
+        app.focus = Focus::Left;
+        app.right_state.select(Some(2));
+        assert!(!Panel::Right.is_focused(&app));
+        selected_row_is_legible(&app, &todo, Panel::Right, 2, "unfocused panel");
+
+        let theme = Theme::new(true, false);
+        let canvas = crate::tui::theme::contrast::luminance(theme.bg);
+        let unfocused = crate::tui::theme::contrast::luminance(theme.selection_unfocused);
+        let focused = crate::tui::theme::contrast::luminance(theme.selection);
+        assert!(canvas < unfocused && unfocused < focused);
+    }
+
+    #[test]
+    fn the_marker_sits_in_the_gutter_of_exactly_the_selected_row() {
+        let (todo, mut app) = selection_state();
+        app.right_state.select(Some(1));
+        let theme = Theme::new(true, false);
+        let buffer = cells(72, 14, &todo, &app, &theme);
+        let [left, right] = panel_split(Rect::new(0, 0, 72, 12));
+        let marker = theme.glyphs.selection_marker;
+        // The task panel selects row 1 (drawn second); the tree keeps row 0.
+        assert_eq!(buffer[(right.x + 1, 2)].symbol(), marker);
+        assert_eq!(buffer[(right.x + 1, 1)].symbol(), " ");
+        assert_eq!(buffer[(right.x + 1, 3)].symbol(), " ");
+        assert_eq!(buffer[(left.x + 1, 1)].symbol(), marker);
+        assert_eq!(buffer[(left.x + 1, 2)].symbol(), " ");
+    }
+
+    #[test]
+    fn the_no_colour_theme_draws_no_backgrounds_at_all() {
+        let (todo, app) = normal_state();
+        let theme = Theme::new(false, false);
+        let buffer = cells(72, 14, &todo, &app, &theme);
+        for y in 0..14 {
+            for x in 0..72 {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    Color::Reset,
+                    "({x},{y}) kept a background without colour support"
+                );
+            }
+        }
+        assert_eq!(theme.selection_style(true).bg, None);
     }
 }

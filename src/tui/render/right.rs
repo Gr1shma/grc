@@ -2,9 +2,10 @@
 
 use crate::due::{parse_due_token_from, resolve_relative_date_from};
 use crate::task::{Task, TodoList, get_node};
-use crate::tui::state::{AppState, Focus, Mode, TextField};
+use crate::tui::render::Panel;
+use crate::tui::state::{AppState, Mode, TextField};
 use crate::tui::task_ref::{TaskRef, full_breadcrumb, get_task_from_ref, get_task_refs_filtered};
-use crate::tui::theme::{DueUrgency, Theme};
+use crate::tui::theme::{DueUrgency, RowTheme, Theme};
 use crate::tui::tree::selected_node;
 use crate::tui::widgets::{
     GUTTER, border_scrollbar, display_width, highlight, list_offset, panel, split_at_char,
@@ -19,10 +20,15 @@ use ratatui::widgets::{
     Block, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
+/// Cells a task's own text must keep before the row gives up its breadcrumb.
+///
+/// The text identifies the row, so on a narrow panel the "section ›" prefix is
+/// dropped first and only the text is allowed to end in an ellipsis.
+const MIN_TEXT_WIDTH: usize = 4;
+
 /// Draw the task list for the selected section.
 pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Theme, area: Rect) {
-    let focused = matches!(app.mode, Mode::InputTask(_) | Mode::InputDue(_))
-        || (app.focus == Focus::Right && matches!(app.mode, Mode::Normal));
+    let focused = Panel::Right.is_focused(app);
     let title = selected_node(app)
         .map(|path| full_breadcrumb(todo_list, &path))
         .unwrap_or_else(|| "Tasks".to_string());
@@ -34,7 +40,6 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &T
     let width = usize::from(area.width.saturating_sub(2 + GUTTER as u16));
     let ctx = RowContext {
         app,
-        theme,
         today: app.today,
         width,
     };
@@ -52,31 +57,53 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &T
         _ => None,
     };
 
+    // The insertion ghost is spliced into the list below, so it takes a row
+    // index of its own and shifts every row after it by one.
+    let ghost_position = match &app.mode {
+        Mode::InputTask(input) if input.editing_idx.is_none() => Some(
+            input
+                .insert_idx
+                .unwrap_or(task_refs.len())
+                .min(task_refs.len()),
+        ),
+        _ => None,
+    };
+    let selected = app.right_state.selected();
+    let selected_ref = selected.and_then(|selected| match ghost_position {
+        Some(ghost) if selected == ghost => None,
+        Some(ghost) if selected > ghost => Some(selected - 1),
+        _ => Some(selected),
+    });
+
     let mut items: Vec<ListItem> = task_refs
         .iter()
         .enumerate()
         .map(|(index, task_ref)| {
+            let row = RowTheme::new(theme, selected_ref == Some(index), focused);
             let Some(task) = get_task_from_ref(todo_list, task_ref) else {
                 return ListItem::new(Line::from(""));
             };
             if Some(index) == editing_idx {
                 let field = editing_field.expect("edit field exists for editing row");
-                editing_item(&ctx, field, task.is_done, task_ref.sub_name.as_deref())
+                editing_item(
+                    &ctx,
+                    field,
+                    task.is_done,
+                    task_ref.sub_name.as_deref(),
+                    &row,
+                )
             } else if due_target == Some(task_ref) {
                 let field = due_field.expect("due field exists for due row");
-                due_editing_item(&ctx, task, field, task_ref.sub_name.as_deref())
+                due_editing_item(&ctx, task, field, task_ref.sub_name.as_deref(), &row)
             } else {
-                task_item(&ctx, task, task_ref)
+                task_item(&ctx, task, task_ref, &row)
             }
         })
         .collect();
 
-    if let Mode::InputTask(input) = &app.mode
-        && input.editing_idx.is_none()
-    {
-        let ghost = ghost_item(&ctx, &input.field);
-        let position = input.insert_idx.unwrap_or(items.len()).min(items.len());
-        items.insert(position, ghost);
+    if let (Mode::InputTask(input), Some(position)) = (&app.mode, ghost_position) {
+        let row = RowTheme::new(theme, selected == Some(position), focused);
+        items.insert(position, ghost_item(&ctx, &input.field, &row));
     }
 
     if items.is_empty() {
@@ -96,7 +123,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &T
     };
     let list = List::new(items)
         .block(block)
-        .highlight_style(theme.selection_style())
+        .highlight_style(theme.selection_style(focused))
         .highlight_symbol("");
     f.render_stateful_widget(list, area, &mut state);
     draw_scrollbar(f, area, row_count, height, offset, theme);
@@ -104,50 +131,60 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &T
 
 struct RowContext<'a> {
     app: &'a AppState,
-    theme: &'a Theme,
     today: NaiveDate,
     width: usize,
 }
 
-/// Blank cells between the panel border and the checkbox column.
-fn gutter() -> Span<'static> {
-    Span::raw(" ".repeat(GUTTER))
+/// Cells between the checkbox and the task text, once the breadcrumb that did
+/// not fit has been dropped.
+fn text_room(ctx: &RowContext<'_>, used: usize, breadcrumb: Option<usize>, due: usize) -> usize {
+    ctx.width
+        .saturating_sub(used + breadcrumb.unwrap_or(0) + due + 1)
 }
 
-fn task_item(ctx: &RowContext<'_>, task: &Task, task_ref: &TaskRef) -> ListItem<'static> {
-    let (glyph, glyph_style) = ctx.theme.checkbox(task.is_done);
+fn task_item(
+    ctx: &RowContext<'_>,
+    task: &Task,
+    task_ref: &TaskRef,
+    row: &RowTheme<'_>,
+) -> ListItem<'static> {
+    let (glyph, glyph_style) = row.checkbox(task.is_done);
     let mut spans = vec![
-        gutter(),
+        row.gutter(),
         Span::styled(glyph.to_string(), glyph_style),
         Span::raw(" "),
     ];
     let mut used = GUTTER + display_width(glyph) + 1;
 
-    if let Some(name) = &task_ref.sub_name {
-        let breadcrumb = format!("{name} {} ", ctx.theme.glyphs.breadcrumb_sep);
-        used += display_width(&breadcrumb);
-        spans.push(Span::styled(breadcrumb, ctx.theme.dim_style()));
-    }
-
     let due = task.due.map(|date| {
         (
             format_due(date, ctx.today),
-            due_style(ctx.theme, task.is_done, date, ctx.today),
+            row.due(due_urgency(task.is_done, date, ctx.today)),
         )
     });
     let due_width = due.as_ref().map_or(0, |(label, _)| display_width(label));
-    let text_room = ctx.width.saturating_sub(used + due_width + 1);
-    let text = truncate_ellipsis(&task.text, text_room, ctx.theme.glyphs.ellipsis);
-    let text_style = if task.is_done {
-        ctx.theme.done_style()
-    } else {
-        ctx.theme.text_style()
-    };
+
+    let mut breadcrumb = task_ref
+        .sub_name
+        .as_ref()
+        .map(|name| format!("{name} {} ", row.glyphs().breadcrumb_sep));
+    let breadcrumb_width = breadcrumb.as_ref().map(|text| display_width(text));
+    if text_room(ctx, used, breadcrumb_width, due_width) < MIN_TEXT_WIDTH {
+        breadcrumb = None;
+    }
+    if let Some(breadcrumb) = breadcrumb {
+        used += display_width(&breadcrumb);
+        spans.push(Span::styled(breadcrumb, row.breadcrumb()));
+    }
+
+    let room = text_room(ctx, used, None, due_width);
+    let text = truncate_ellipsis(&task.text, room, row.glyphs().ellipsis);
+    let text_style = if task.is_done { row.done() } else { row.text() };
     spans.extend(highlight(
         &text,
         &ctx.app.filter_lower,
         text_style,
-        ctx.theme.match_style(),
+        row.matched(),
     ));
     used += display_width(&text);
 
@@ -165,47 +202,38 @@ fn editing_item(
     field: &TextField,
     is_done: bool,
     sub_name: Option<&str>,
+    row: &RowTheme<'_>,
 ) -> ListItem<'static> {
-    let (glyph, glyph_style) = ctx.theme.checkbox(is_done);
+    let (glyph, glyph_style) = row.checkbox(is_done);
     let mut spans = vec![
-        gutter(),
+        row.gutter(),
         Span::styled(glyph.to_string(), glyph_style),
         Span::raw(" "),
     ];
     if let Some(name) = sub_name {
         spans.push(Span::styled(
-            format!("{name} {} ", ctx.theme.glyphs.breadcrumb_sep),
-            ctx.theme.dim_style(),
+            format!("{name} {} ", row.glyphs().breadcrumb_sep),
+            row.breadcrumb(),
         ));
     }
     let due = inline_due(&field.buf, ctx.today);
-    spans.extend(buffer_spans(
-        field,
-        due.as_ref(),
-        ctx.theme.text_style(),
-        ctx.theme,
-    ));
-    if let Some(preview) = due_preview(due.as_ref(), ctx.today, ctx.theme) {
+    spans.extend(buffer_spans(field, due.as_ref(), row.text(), row));
+    if let Some(preview) = due_preview(due.as_ref(), ctx.today, row) {
         spans.push(preview);
     }
     ListItem::new(Line::from(spans))
 }
 
-fn ghost_item(ctx: &RowContext<'_>, field: &TextField) -> ListItem<'static> {
-    let (glyph, glyph_style) = ctx.theme.checkbox(false);
+fn ghost_item(ctx: &RowContext<'_>, field: &TextField, row: &RowTheme<'_>) -> ListItem<'static> {
+    let (glyph, glyph_style) = row.checkbox(false);
     let mut spans = vec![
-        gutter(),
+        row.gutter(),
         Span::styled(glyph.to_string(), glyph_style),
         Span::raw(" "),
     ];
     let due = inline_due(&field.buf, ctx.today);
-    spans.extend(buffer_spans(
-        field,
-        due.as_ref(),
-        ctx.theme.text_style(),
-        ctx.theme,
-    ));
-    if let Some(preview) = due_preview(due.as_ref(), ctx.today, ctx.theme) {
+    spans.extend(buffer_spans(field, due.as_ref(), row.text(), row));
+    if let Some(preview) = due_preview(due.as_ref(), ctx.today, row) {
         spans.push(preview);
     }
     ListItem::new(Line::from(spans))
@@ -216,45 +244,52 @@ fn due_editing_item(
     task: &Task,
     field: &TextField,
     sub_name: Option<&str>,
+    row: &RowTheme<'_>,
 ) -> ListItem<'static> {
-    let (glyph, glyph_style) = ctx.theme.checkbox(task.is_done);
+    let (glyph, glyph_style) = row.checkbox(task.is_done);
     let mut spans = vec![
-        gutter(),
+        row.gutter(),
         Span::styled(glyph.to_string(), glyph_style),
         Span::raw(" "),
     ];
     let mut used = GUTTER + display_width(glyph) + 1;
-    if let Some(name) = sub_name {
-        let breadcrumb = format!("{name} {} ", ctx.theme.glyphs.breadcrumb_sep);
-        used += display_width(&breadcrumb);
-        spans.push(Span::styled(breadcrumb, ctx.theme.dim_style()));
-    }
 
     let prefix = "due:";
     let parsed = resolve_relative_date_from(field.buf.trim(), ctx.today);
     let field_style = match parsed {
-        Some(_) => ctx.theme.match_style(),
-        None if field.buf.trim().is_empty() => ctx.theme.dim_style(),
-        None => ctx.theme.error_style(),
+        Some(_) => row.matched(),
+        None if field.buf.trim().is_empty() => row.dim(),
+        None => row.error(),
     };
     let (preview_text, preview_style) = due_preview_text(
         parsed,
         field.buf.trim().is_empty(),
         task.due.is_some(),
         ctx.today,
-        ctx.theme,
+        row,
     );
     let suffix_width =
         display_width(prefix) + field.buf.chars().count() + 1 + display_width(&preview_text);
-    let text_room = ctx.width.saturating_sub(used + suffix_width + 1);
-    let text = truncate_ellipsis(&task.text, text_room, ctx.theme.glyphs.ellipsis);
-    spans.push(Span::styled(text.clone(), ctx.theme.text_style()));
+
+    let mut breadcrumb = sub_name.map(|name| format!("{name} {} ", row.glyphs().breadcrumb_sep));
+    let breadcrumb_width = breadcrumb.as_ref().map(|text| display_width(text));
+    if text_room(ctx, used, breadcrumb_width, suffix_width) < MIN_TEXT_WIDTH {
+        breadcrumb = None;
+    }
+    if let Some(breadcrumb) = breadcrumb {
+        used += display_width(&breadcrumb);
+        spans.push(Span::styled(breadcrumb, row.breadcrumb()));
+    }
+
+    let room = text_room(ctx, used, None, suffix_width);
+    let text = truncate_ellipsis(&task.text, room, row.glyphs().ellipsis);
+    spans.push(Span::styled(text.clone(), row.text()));
     used += display_width(&text);
     spans.push(Span::raw(
         " ".repeat(ctx.width.saturating_sub(used + suffix_width)),
     ));
-    spans.push(Span::styled(prefix.to_string(), ctx.theme.dim_style()));
-    spans.extend(buffer_spans(field, None, field_style, ctx.theme));
+    spans.push(Span::styled(prefix.to_string(), row.dim()));
+    spans.extend(buffer_spans(field, None, field_style, row));
     spans.push(Span::styled(preview_text, preview_style));
     ListItem::new(Line::from(spans))
 }
@@ -308,13 +343,12 @@ fn empty_state<'a>(
     Paragraph::new(hint).block(block)
 }
 
-fn due_style(theme: &Theme, is_done: bool, date: NaiveDate, today: NaiveDate) -> Style {
-    let urgency = if is_done {
+fn due_urgency(is_done: bool, date: NaiveDate, today: NaiveDate) -> DueUrgency {
+    if is_done {
         DueUrgency::Done
     } else {
         urgency_for_date(date, today)
-    };
-    theme.due_style(urgency)
+    }
 }
 
 fn urgency_for_date(date: NaiveDate, today: NaiveDate) -> DueUrgency {
@@ -429,7 +463,7 @@ fn buffer_spans(
     field: &TextField,
     due: Option<&InlineDue>,
     base: Style,
-    theme: &Theme,
+    row: &RowTheme<'_>,
 ) -> Vec<Span<'static>> {
     let buf = field.buf.as_str();
     let cursor = split_at_char(buf, field.cursor).0.len();
@@ -445,14 +479,14 @@ fn buffer_spans(
     for pair in boundaries.windows(2) {
         let (start, end) = (pair[0], pair[1]);
         if start == cursor {
-            spans.push(cursor_span(theme));
+            spans.push(cursor_span(row));
         }
         let style = match due {
             Some(due) if start >= due.start && end <= due.end => {
                 if due.parsed.is_some() {
-                    theme.match_style()
+                    row.matched()
                 } else {
-                    theme.error_style()
+                    row.error()
                 }
             }
             _ => base,
@@ -462,13 +496,13 @@ fn buffer_spans(
         }
     }
     if cursor == buf.len() {
-        spans.push(cursor_span(theme));
+        spans.push(cursor_span(row));
     }
     spans
 }
 
-fn cursor_span(theme: &Theme) -> Span<'static> {
-    Span::styled(theme.glyphs.cursor.to_string(), theme.cursor_style())
+fn cursor_span(row: &RowTheme<'_>) -> Span<'static> {
+    Span::styled(row.glyphs().cursor.to_string(), row.cursor())
 }
 
 fn due_preview_text(
@@ -476,39 +510,40 @@ fn due_preview_text(
     empty: bool,
     had_date: bool,
     today: NaiveDate,
-    theme: &Theme,
+    row: &RowTheme<'_>,
 ) -> (String, Style) {
     match parsed {
         Some(date) => (
-            format!("  {} {}", theme.glyphs.preview, format_due(date, today)),
-            theme.due_style(urgency_for_date(date, today)),
+            format!("  {} {}", row.glyphs().preview, format_due(date, today)),
+            row.due(urgency_for_date(date, today)),
         ),
-        None if empty => (
-            format!("  {} cleared", theme.glyphs.preview),
-            theme.dim_style(),
-        ),
+        None if empty => (format!("  {} cleared", row.glyphs().preview), row.dim()),
         // "old date kept" is only true when this task already had one.
         None if had_date => (
-            format!("  {} invalid — old date kept", theme.glyphs.invalid_due),
-            theme.error_style(),
+            format!("  {} invalid — old date kept", row.glyphs().invalid_due),
+            row.error(),
         ),
         None => (
-            format!("  {} invalid date", theme.glyphs.invalid_due),
-            theme.error_style(),
+            format!("  {} invalid date", row.glyphs().invalid_due),
+            row.error(),
         ),
     }
 }
 
-fn due_preview(due: Option<&InlineDue>, today: NaiveDate, theme: &Theme) -> Option<Span<'static>> {
+fn due_preview(
+    due: Option<&InlineDue>,
+    today: NaiveDate,
+    row: &RowTheme<'_>,
+) -> Option<Span<'static>> {
     let due = due?;
     Some(match due.parsed {
         Some(date) => Span::styled(
-            format!("  {} {}", theme.glyphs.preview, format_due(date, today)),
-            theme.due_style(urgency_for_date(date, today)),
+            format!("  {} {}", row.glyphs().preview, format_due(date, today)),
+            row.due(urgency_for_date(date, today)),
         ),
         None => Span::styled(
-            format!("  {} invalid due", theme.glyphs.invalid_due),
-            theme.error_style(),
+            format!("  {} invalid due", row.glyphs().invalid_due),
+            row.error(),
         ),
     })
 }
@@ -595,13 +630,14 @@ mod tests {
     #[test]
     fn due_preview_only_mentions_a_kept_date_when_there_was_one() {
         let theme = Theme::plain();
-        let (kept, _) = due_preview_text(None, false, true, today(), &theme);
+        let row = RowTheme::new(&theme, false, true);
+        let (kept, _) = due_preview_text(None, false, true, today(), &row);
         assert!(kept.contains("old date kept"));
-        let (first, _) = due_preview_text(None, false, false, today(), &theme);
+        let (first, _) = due_preview_text(None, false, false, today(), &row);
         assert!(!first.contains("kept"));
         assert!(first.contains("invalid date"));
 
-        let (cleared, _) = due_preview_text(None, true, true, today(), &theme);
+        let (cleared, _) = due_preview_text(None, true, true, today(), &row);
         assert!(cleared.contains("cleared"));
     }
 

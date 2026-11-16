@@ -1,5 +1,5 @@
 ╭ Sections ─╭ Keybindings ─────────────────────────────────────────╮───────────╮
-│ ▾ Work    │  Navigate                                            │     today │
+│▌▾ Work    │  Navigate                                            │     today │
 │ │   Urgent│    j/k, ↓/↑            move or scroll                │           │
 │   Home    │    gg / G              top / bottom                  │ar 1, 2027 │
 │           │    5j / 3k             count motion                  │       tmr │

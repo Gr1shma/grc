@@ -1,8 +1,9 @@
 //! Section tree panel.
 
 use crate::task::{TodoList, child_count, get_node};
-use crate::tui::state::{AppState, Focus, Mode, TextField, TreeItem};
-use crate::tui::theme::Theme;
+use crate::tui::render::Panel;
+use crate::tui::state::{AppState, Mode, TextField, TreeItem};
+use crate::tui::theme::{RowTheme, Theme};
 use crate::tui::widgets::{
     GUTTER, border_scrollbar, display_width, highlight, list_offset, panel, split_at_char,
     truncate_ellipsis,
@@ -19,11 +20,7 @@ const MIN_NAME_WIDTH: usize = 4;
 
 /// Draw the section tree.
 pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Theme, area: Rect) {
-    let focused = app.focus == Focus::Left
-        && !matches!(
-            app.mode,
-            Mode::Help | Mode::Conflict | Mode::Filter | Mode::InputTask(_) | Mode::InputDue(_)
-        );
+    let focused = Panel::Left.is_focused(app);
 
     let title = if app.filter.is_empty() {
         "Sections"
@@ -41,84 +38,89 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
     let items: Vec<ListItem> = app
         .tree_items
         .iter()
-        .map(|item| match item {
-            TreeItem::Ghost(depth) => {
-                let field = ghost_field.cloned().unwrap_or_default();
-                ghost_item(&field, *depth, inner_width, theme)
-            }
-            TreeItem::Node(path) => {
-                let Some(section) = get_node(todo_list, path) else {
-                    return ListItem::new(Line::from(""));
-                };
-                let depth = path.len().saturating_sub(1);
-                let has_children = !section.children.is_empty();
-                let folded = app.folded.contains(path);
-                let marker = if has_children {
-                    if folded {
-                        theme.glyphs.fold_closed
+        .enumerate()
+        .map(|(index, item)| {
+            let row = RowTheme::new(theme, app.left_state.selected() == Some(index), focused);
+            match item {
+                TreeItem::Ghost(depth) => {
+                    let field = ghost_field.cloned().unwrap_or_default();
+                    ghost_item(&field, *depth, inner_width, &row)
+                }
+                TreeItem::Node(path) => {
+                    let Some(section) = get_node(todo_list, path) else {
+                        return ListItem::new(Line::from(""));
+                    };
+                    let depth = path.len().saturating_sub(1);
+                    let has_children = !section.children.is_empty();
+                    let folded = app.folded.contains(path);
+                    let marker = if has_children {
+                        if folded {
+                            row.glyphs().fold_closed
+                        } else {
+                            row.glyphs().fold_open
+                        }
                     } else {
-                        theme.glyphs.fold_open
-                    }
-                } else {
-                    " "
-                };
+                        " "
+                    };
 
-                let renaming = renaming_node.is_some_and(|node| node == path);
-                let name_style = theme.section_name_style(depth);
+                    let renaming = renaming_node.is_some_and(|node| node == path);
+                    let name_style = row.section_name(depth);
 
-                let total = section.count_tasks();
-                let done = section.count_done_tasks();
-                let prefix_width = depth * 2 + GUTTER + 2;
-                let counter = if total == 0 {
-                    String::new()
-                } else {
-                    format!("{done}/{total}")
-                };
-                // The name is what identifies the row, so a narrow panel drops
-                // the counter rather than truncating the name away entirely.
-                let progress =
-                    if prefix_width + display_width(&counter) + 1 + MIN_NAME_WIDTH > inner_width {
+                    let total = section.count_tasks();
+                    let done = section.count_done_tasks();
+                    let prefix_width = depth * 2 + GUTTER + 2;
+                    let counter = if total == 0 {
+                        String::new()
+                    } else {
+                        format!("{done}/{total}")
+                    };
+                    // The name is what identifies the row, so a narrow panel
+                    // drops the counter rather than truncating the name away.
+                    let progress = if prefix_width + display_width(&counter) + 1 + MIN_NAME_WIDTH
+                        > inner_width
+                    {
                         String::new()
                     } else {
                         counter
                     };
-                let progress_width = display_width(&progress);
-                let gap = usize::from(progress_width > 0);
-                let name_room = inner_width.saturating_sub(prefix_width + progress_width + gap);
-                let display_name = if renaming {
-                    String::new()
-                } else {
-                    truncate_ellipsis(&section.name, name_room, theme.glyphs.ellipsis)
-                };
-                let name_width = if renaming {
-                    rename_field.map_or(0, |field| field.buf.chars().count() + 1)
-                } else {
-                    display_width(&display_name)
-                };
+                    let progress_width = display_width(&progress);
+                    let gap = usize::from(progress_width > 0);
+                    let name_room = inner_width.saturating_sub(prefix_width + progress_width + gap);
+                    let display_name = if renaming {
+                        String::new()
+                    } else {
+                        truncate_ellipsis(&section.name, name_room, row.glyphs().ellipsis)
+                    };
+                    let name_width = if renaming {
+                        rename_field.map_or(0, |field| field.buf.chars().count() + 1)
+                    } else {
+                        display_width(&display_name)
+                    };
 
-                let mut spans = vec![Span::raw(" ".repeat(GUTTER))];
-                spans.extend(guide_prefix(todo_list, path, theme));
-                spans.push(Span::styled(format!("{marker} "), theme.fold_style()));
-                if renaming {
-                    if let Some(field) = rename_field {
-                        spans.extend(editing_spans(field, name_style, theme));
+                    let mut spans = vec![row.gutter()];
+                    spans.extend(guide_prefix(todo_list, path, &row));
+                    spans.push(Span::styled(format!("{marker} "), row.fold()));
+                    if renaming {
+                        if let Some(field) = rename_field {
+                            spans.extend(editing_spans(field, name_style, &row));
+                        }
+                    } else {
+                        spans.extend(highlight(
+                            &display_name,
+                            &app.filter_lower,
+                            name_style,
+                            row.matched(),
+                        ));
                     }
-                } else {
-                    spans.extend(highlight(
-                        &display_name,
-                        &app.filter_lower,
-                        name_style,
-                        theme.match_style(),
-                    ));
-                }
 
-                let left_width = prefix_width + name_width;
-                let padding = inner_width
-                    .saturating_sub(left_width)
-                    .saturating_sub(progress_width);
-                spans.push(Span::raw(" ".repeat(padding)));
-                spans.push(Span::styled(progress, theme.meta_style()));
-                ListItem::new(Line::from(spans))
+                    let left_width = prefix_width + name_width;
+                    let padding = inner_width
+                        .saturating_sub(left_width)
+                        .saturating_sub(progress_width);
+                    spans.push(Span::raw(" ".repeat(padding)));
+                    spans.push(Span::styled(progress, row.dim()));
+                    ListItem::new(Line::from(spans))
+                }
             }
         })
         .collect();
@@ -135,7 +137,7 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
     let row_count = items.len();
     let list = List::new(items)
         .block(block)
-        .highlight_style(theme.selection_style())
+        .highlight_style(theme.selection_style(focused))
         .highlight_symbol("");
     f.render_stateful_widget(list, area, &mut state);
     draw_scrollbar(f, area, row_count, height, offset, theme);
@@ -146,32 +148,40 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Th
 /// Every level of depth contributes two cells. A level whose ancestor still has
 /// later siblings draws a vertical guide, so a branch stays visually connected
 /// to its parent; the last child of an ancestor leaves the cells blank.
-fn guide_prefix(todo_list: &TodoList, path: &[usize], theme: &Theme) -> Vec<Span<'static>> {
+fn guide_prefix(todo_list: &TodoList, path: &[usize], row: &RowTheme<'_>) -> Vec<Span<'static>> {
     let depth = path.len().saturating_sub(1);
     (0..depth)
         .map(|level| {
             let parent = (level > 0).then(|| path[..level].to_vec());
             let last = path[level] + 1 >= child_count(todo_list, parent.as_ref());
-            let glyph = if last { " " } else { theme.glyphs.tree_guide };
-            Span::styled(format!("{glyph} "), theme.tree_guide())
+            let glyph = if last { " " } else { row.glyphs().tree_guide };
+            Span::styled(format!("{glyph} "), row.guide())
         })
         .collect()
 }
 
-fn ghost_item(field: &TextField, depth: usize, width: usize, theme: &Theme) -> ListItem<'static> {
+fn ghost_item(
+    field: &TextField,
+    depth: usize,
+    width: usize,
+    row: &RowTheme<'_>,
+) -> ListItem<'static> {
     let indent = depth * 2 + GUTTER + 2;
-    let mut spans = vec![Span::raw(" ".repeat(indent))];
-    spans.extend(editing_spans(field, theme.text_style(), theme));
+    let mut spans = vec![
+        row.gutter(),
+        Span::raw(" ".repeat(indent.saturating_sub(GUTTER))),
+    ];
+    spans.extend(editing_spans(field, row.text(), row));
     let used = indent + field.buf.chars().count() + 1;
     spans.push(Span::raw(" ".repeat(width.saturating_sub(used))));
     ListItem::new(Line::from(spans))
 }
 
-fn editing_spans(field: &TextField, base: Style, theme: &Theme) -> Vec<Span<'static>> {
+fn editing_spans(field: &TextField, base: Style, row: &RowTheme<'_>) -> Vec<Span<'static>> {
     let (before, after) = split_at_char(&field.buf, field.cursor);
     vec![
         Span::styled(before.to_string(), base),
-        Span::styled(theme.glyphs.cursor.to_string(), theme.cursor_style()),
+        Span::styled(row.glyphs().cursor.to_string(), row.cursor()),
         Span::styled(after.to_string(), base),
     ]
 }
@@ -210,14 +220,27 @@ mod tests {
         let field = TextField::new("abc");
         let mut field = field;
         field.cursor = 1;
-        let spans = editing_spans(&field, Style::default(), &Theme::plain());
+        let theme = Theme::plain();
+        let row = RowTheme::new(&theme, false, true);
+        let spans = editing_spans(&field, row.text(), &row);
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "a");
-        assert_eq!(spans[1].content, theme_cursor());
+        assert_eq!(spans[1].content, theme.glyphs.cursor);
         assert_eq!(spans[2].content, "bc");
     }
 
-    fn theme_cursor() -> &'static str {
-        Theme::plain().glyphs.cursor
+    #[test]
+    fn the_gutter_holds_the_marker_only_for_the_selected_row() {
+        let theme = Theme::plain();
+        let field = TextField::new("x");
+        let mark = |selected| {
+            let row = RowTheme::new(&theme, selected, true);
+            let item = ghost_item(&field, 2, 40, &row);
+            item.width()
+        };
+        assert_eq!(mark(false), mark(true));
+        let selected = RowTheme::new(&theme, true, true);
+        assert_eq!(selected.gutter().content, theme.glyphs.selection_marker);
+        assert_eq!(RowTheme::new(&theme, false, true).gutter().content, " ");
     }
 }

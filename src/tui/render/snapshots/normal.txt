@@ -1,5 +1,5 @@
 ╭ Sections ───────╮╭ Work ─────────────────────────────────────────────╮
-│ ▾ Work       1/5││ ☐ Ship release                              today │
+│▌▾ Work       1/5││▌☐ Ship release                              today │
 │ │   Urgent   0/2││ ☑ Write docs                                      │
 │   Home       0/1││ ☐ Plan next week                      Mar 1, 2027 │
 │                 ││ ☐ Urgent › Fix bug                            tmr │

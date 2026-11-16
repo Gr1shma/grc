@@ -28,4 +28,5 @@ pub fn dialog<'a>(theme: &Theme, title: impl Into<String>) -> Block<'a> {
             theme.dialog_title(),
         ))
         .border_style(theme.dialog_border())
+        .style(theme.base_style())
 }
