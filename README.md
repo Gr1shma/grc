@@ -103,7 +103,7 @@ ignore it.
 | `Space` / `x` / `Enter` | Toggle done |
 | `a` / `o` / `O` / `A` | Add task below / below / above / append |
 | `i` / `t` | Edit task text / edit due date |
-| `dd` / `3dd` | Delete selected task / next three tasks |
+| `dd` / `3dd` | Delete the selected task / three tasks starting at the cursor |
 | `yy` / `p` / `P` | Yank task / paste below / paste above |
 | `:` | Recursively sort the selected section by due date |
 | `J` / `K` | Move the task down / up among its visible siblings |
