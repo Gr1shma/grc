@@ -51,6 +51,10 @@ const SUCCESS: Color = Color::Rgb(74, 222, 128);
 const GUIDE: Color = Color::Rgb(120, 138, 162);
 
 /// Box, fold, and cursor glyphs.
+///
+/// Every glyph is one terminal cell and none of them is in the emoji set: a
+/// terminal that substitutes an emoji font draws that line taller than its
+/// neighbours, which breaks the one-row-per-line grid the layout assumes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Glyphs {
     /// Unchecked task box.
@@ -85,8 +89,8 @@ impl Glyphs {
     /// Unicode box drawing and symbols.
     pub const fn unicode() -> Self {
         Self {
-            checkbox_todo: "☐",
-            checkbox_done: "☑",
+            checkbox_todo: "□",
+            checkbox_done: "✓",
             fold_open: "▾",
             fold_closed: "▸",
             tree_guide: "│",
@@ -732,6 +736,79 @@ mod tests {
         use crate::tui::widgets::{GUTTER, display_width};
         for glyphs in [Glyphs::unicode(), Glyphs::ascii()] {
             assert_eq!(display_width(glyphs.selection_marker), GUTTER);
+        }
+    }
+
+    fn every_glyph(glyphs: Glyphs) -> [(&'static str, &'static str); 12] {
+        [
+            ("checkbox_todo", glyphs.checkbox_todo),
+            ("checkbox_done", glyphs.checkbox_done),
+            ("fold_open", glyphs.fold_open),
+            ("fold_closed", glyphs.fold_closed),
+            ("tree_guide", glyphs.tree_guide),
+            ("cursor", glyphs.cursor),
+            ("breadcrumb_sep", glyphs.breadcrumb_sep),
+            ("invalid_due", glyphs.invalid_due),
+            ("preview", glyphs.preview),
+            ("ellipsis", glyphs.ellipsis),
+            ("selection_marker", glyphs.selection_marker),
+            ("scroll_thumb", glyphs.scroll_thumb),
+        ]
+    }
+
+    /// Code points a terminal may draw with an emoji font, making the row
+    /// taller than its neighbours.
+    const EMOJI_CAPABLE: [char; 10] = [
+        '\u{2610}',  // ☐ BALLOT BOX (what the checkbox used to be)
+        '\u{2611}',  // ☑ BALLOT BOX WITH CHECK
+        '\u{2705}',  // ✅
+        '\u{2714}',  // ✔
+        '\u{274c}',  // ❌
+        '\u{2b1b}',  // ⬛
+        '\u{2b1c}',  // ⬜
+        '\u{1f5f8}', // 🗸
+        '\u{1f5f9}', // 🗹
+        '\u{fe0f}',  // emoji variation selector
+    ];
+
+    #[test]
+    fn no_glyph_can_be_drawn_as_emoji() {
+        for glyphs in [Glyphs::unicode(), Glyphs::ascii()] {
+            for (name, glyph) in every_glyph(glyphs) {
+                for character in glyph.chars() {
+                    assert!(
+                        !EMOJI_CAPABLE.contains(&character),
+                        "{name} ({glyph:?}) can be drawn as emoji, which makes its row taller"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Pinned on purpose: the layout arithmetic assumes one cell per glyph, so
+    /// a new glyph has to be added here (and checked by the test above).
+    #[test]
+    fn the_glyph_set_is_exactly_this() {
+        let unicode = Glyphs::unicode();
+        assert_eq!(
+            every_glyph(unicode).map(|(_, glyph)| glyph),
+            ["□", "✓", "▾", "▸", "│", "│", "›", "!", "→", "…", "▌", "█"]
+        );
+        let ascii = Glyphs::ascii();
+        assert_eq!(
+            every_glyph(ascii).map(|(_, glyph)| glyph),
+            [
+                "[ ]", "[x]", "v", ">", "|", "|", ">", "!", "->", "...", "|", "#"
+            ]
+        );
+    }
+
+    #[test]
+    fn every_unicode_glyph_is_one_cell() {
+        use crate::tui::widgets::display_width;
+        for (name, glyph) in every_glyph(Glyphs::unicode()) {
+            assert_eq!(glyph.chars().count(), 1, "{name} is not a single glyph");
+            assert_eq!(display_width(glyph), 1, "{name} is not a single cell");
         }
     }
 

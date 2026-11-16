@@ -36,11 +36,11 @@ GRC_TODO_PATH=/path/to/todo.md grc
 
 ```
 ╭ Sections ───────╮╭ Work ─────────────────────────────────────────────╮
-│ ▾ Work       1/5││ ☐ Ship release                              today │
-│ │   Urgent   0/2││ ☑ Write docs                                      │
-│   Home       0/1││ ☐ Plan next week                      Mar 1, 2027 │
-│                 ││ ☐ Urgent › Fix bug                            tmr │
-│                 ││ ☐ Urgent › Call back                              │
+│▌▾ Work       1/5││▌□ Ship release                              today │
+│ │   Urgent   0/2││ ✓ Write docs                                      │
+│   Home       0/1││ □ Plan next week                      Mar 1, 2027 │
+│                 ││ □ Urgent › Fix bug                            tmr │
+│                 ││ □ Urgent › Call back                              │
 ╰─────────────────╯╰───────────────────────────────────────────────────╯
  j/k move  ·  x toggle  ·  a/o add  ·  i edit  ·  t due  ·  ? help
  NORMAL                                                    1/6  todo.md
@@ -53,11 +53,27 @@ context-sensitive hint bar and a status bar. The status bar shows the mode pill,
 transient message (`saved`, `pasted`, errors), overall progress, and the file
 name. Due dates are right-aligned and coloured by urgency; completed tasks are
 dimmed and struck through. A scrollbar appears at the panel's right edge only
-when its content overflows.
+when its content overflows. Long task text is cut with `…` before the due
+column, and a row that is too narrow for its `Section ›` breadcrumb drops the
+breadcrumb rather than the task text.
 
-Set `NO_COLOR=1` to disable colour, and `GRC_ASCII=1` for ASCII checkboxes
-(`[ ]` / `[x]`), fold markers (`>` / `v`), and scrollbars. Neither option
-changes the file format.
+### Selection and colour
+
+The selected row is a dark tint a shade lighter than the panel, plus a `▌` bar in
+the left gutter; the unfocused panel uses a weaker tint. Every foreground colour
+is chosen against the background it can land on and checked in the test suite for
+at least a 4.5:1 contrast ratio (3:1 for decorative glyphs such as the tree
+guides), so dim metadata stays readable under the bar.
+
+`grc` paints its own background. Set `NO_COLOR=1` to disable colour and inherit
+the terminal's, and `GRC_ASCII=1` for ASCII checkboxes (`[ ]` / `[x]`), fold
+markers (`>` / `v`), and scrollbars. Without colour the selected row is marked by
+the `▌` gutter bar and bold text. Neither option changes the file format.
+
+Checkboxes use `□` and `✓` rather than `☐` and `☑`: the ballot-box pair is in
+the emoji set, and a terminal that draws it with an emoji font makes that line
+taller than the rest, which breaks the grid. Every glyph in the interface is one
+cell wide and outside the emoji set.
 
 ## Keybindings
 

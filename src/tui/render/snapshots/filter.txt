@@ -1,5 +1,5 @@
 ╭ Sections · filte╮╭ Work ─────────────────────────────────────────────╮
-│▌▾ Work       1/5││▌☐ Urgent › Fix bug                            tmr │
+│▌▾ Work       1/5││▌□ Urgent › Fix bug                            tmr │
 │ │   Urgent   0/2││                                                   │
 │                 ││                                                   │
 │                 ││                                                   │
