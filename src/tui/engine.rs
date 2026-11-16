@@ -375,7 +375,7 @@ mod tests {
     use super::*;
     use crate::parser::to_markdown;
     use crate::task::Task;
-    use crate::tui::state::{Focus, MessageKind, TextField};
+    use crate::tui::state::{ClipboardItem, Focus, MessageKind, TextField};
     use crate::tui::task_ref::TaskRef;
     use chrono::NaiveDate;
     use std::fs;
@@ -759,5 +759,153 @@ mod tests {
                 .unwrap()
                 .contains("- [ ] New")
         );
+    }
+
+    #[test]
+    fn navigation_keys_switch_panels_and_move_selection() {
+        let (_dir, mut engine) = engine("# a\n- [ ] A\n- [ ] B\n# b\n");
+        press(&mut engine, KeyCode::Char('j'));
+        assert_eq!(engine.app.left_state.selected(), Some(1));
+        press(&mut engine, KeyCode::Char('k'));
+        assert_eq!(engine.app.left_state.selected(), Some(0));
+
+        press(&mut engine, KeyCode::Char('l'));
+        assert_eq!(engine.app.focus, Focus::Right);
+        press(&mut engine, KeyCode::Char('j'));
+        assert_eq!(engine.app.right_state.selected(), Some(1));
+        press(&mut engine, KeyCode::Char('k'));
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+        press(&mut engine, KeyCode::Char('G'));
+        assert_eq!(engine.app.right_state.selected(), Some(1));
+        press(&mut engine, KeyCode::Char('g'));
+        press(&mut engine, KeyCode::Char('g'));
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+
+        press(&mut engine, KeyCode::Char('h'));
+        assert_eq!(engine.app.focus, Focus::Left);
+        press(&mut engine, KeyCode::Tab);
+        assert_eq!(engine.app.focus, Focus::Right);
+        press(&mut engine, KeyCode::Esc);
+        assert_eq!(engine.app.focus, Focus::Left);
+        press(&mut engine, KeyCode::Char('q'));
+    }
+
+    #[test]
+    fn toggle_keys_space_x_and_enter_change_done_state() {
+        let (_dir, mut engine) = engine("# main\n- [ ] A\n");
+        engine.app.focus = Focus::Right;
+        press(&mut engine, KeyCode::Char(' '));
+        assert!(engine.todo_list.sections[0].tasks[0].is_done);
+        press(&mut engine, KeyCode::Char('x'));
+        assert!(!engine.todo_list.sections[0].tasks[0].is_done);
+        press(&mut engine, KeyCode::Enter);
+        assert!(engine.todo_list.sections[0].tasks[0].is_done);
+    }
+
+    #[test]
+    fn yank_and_paste_keys_copy_tasks_and_sections() {
+        let (_dir, mut engine) = engine("# a\n- [ ] A\n- [ ] B\n# b\n");
+        engine.app.focus = Focus::Right;
+        press(&mut engine, KeyCode::Char('y'));
+        press(&mut engine, KeyCode::Char('y'));
+        assert!(matches!(engine.app.clipboard, Some(ClipboardItem::Task(_))));
+        press(&mut engine, KeyCode::Char('p'));
+        assert_eq!(engine.todo_list.sections[0].tasks.len(), 3);
+        press(&mut engine, KeyCode::Char('P'));
+        assert_eq!(engine.todo_list.sections[0].tasks.len(), 4);
+
+        engine.app.focus = Focus::Left;
+        engine.app.left_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('y'));
+        press(&mut engine, KeyCode::Char('y'));
+        assert!(matches!(
+            engine.app.clipboard,
+            Some(ClipboardItem::Section(_))
+        ));
+        press(&mut engine, KeyCode::Char('p'));
+        assert_eq!(engine.todo_list.sections.len(), 3);
+    }
+
+    #[test]
+    fn section_keys_target_the_right_section() {
+        let (_dir, mut engine) = engine("# root\n## child\n# other\n");
+        engine.app.left_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('a'));
+        match &engine.app.mode {
+            Mode::InputSection(input) => {
+                assert_eq!(input.parent, Some(vec![0]));
+                assert_eq!(input.insert_idx, Some(0));
+                assert_eq!(input.level, 2);
+            }
+            _ => panic!("expected section input"),
+        }
+        press(&mut engine, KeyCode::Esc);
+
+        engine.app.left_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('o'));
+        match &engine.app.mode {
+            Mode::InputSection(input) => {
+                assert_eq!(input.parent, None);
+                assert_eq!(input.insert_idx, Some(1));
+                assert_eq!(input.level, 1);
+            }
+            _ => panic!("expected section input"),
+        }
+        press(&mut engine, KeyCode::Esc);
+
+        engine.app.left_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('O'));
+        match &engine.app.mode {
+            Mode::InputSection(input) => assert_eq!(input.insert_idx, Some(0)),
+            _ => panic!("expected section input"),
+        }
+        press(&mut engine, KeyCode::Esc);
+
+        engine.app.left_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('A'));
+        assert!(matches!(engine.app.mode, Mode::InputSection(_)));
+        press(&mut engine, KeyCode::Esc);
+
+        engine.app.left_state.select(Some(0));
+        press(&mut engine, KeyCode::Char('i'));
+        assert!(matches!(engine.app.mode, Mode::InputSection(_)));
+        press(&mut engine, KeyCode::Enter);
+        press(&mut engine, KeyCode::Char('d'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert_eq!(engine.todo_list.sections.len(), 1);
+    }
+
+    #[test]
+    fn task_creation_keys_choose_insert_position() {
+        let (_dir, mut engine) = engine("# main\n- [ ] A\n- [ ] B\n");
+        engine.app.focus = Focus::Right;
+        for (key, index, above) in [
+            ('a', Some(1), false),
+            ('o', Some(1), false),
+            ('O', Some(0), true),
+            ('A', None, false),
+        ] {
+            engine.app.right_state.select(Some(0));
+            press(&mut engine, KeyCode::Char(key));
+            match &engine.app.mode {
+                Mode::InputTask(input) => {
+                    assert_eq!(input.insert_idx, index, "key {key}");
+                    assert_eq!(input.above, above, "key {key}");
+                }
+                _ => panic!("expected task input for {key}"),
+            }
+            press(&mut engine, KeyCode::Esc);
+        }
+    }
+
+    #[test]
+    fn ctrl_c_quits_like_q() {
+        let (_dir, mut engine1) = engine("# main\n- [ ] A\n");
+        assert_eq!(
+            engine1.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Control::Quit
+        );
+        let (_dir, mut engine2) = engine("# main\n- [ ] A\n");
+        assert_eq!(press(&mut engine2, KeyCode::Char('q')), Control::Quit);
     }
 }
