@@ -77,12 +77,6 @@ pub fn byte_index(text: &str, char_index: usize) -> usize {
         .map_or(text.len(), |(byte, _)| byte)
 }
 
-/// Split text at a character index, suitable for drawing a cursor.
-pub fn split_at_char(text: &str, char_index: usize) -> (&str, &str) {
-    let byte = byte_index(text, char_index);
-    (&text[..byte], &text[byte..])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,7 +162,7 @@ mod tests {
 
     #[test]
     fn split_handles_multibyte_and_out_of_range() {
-        assert_eq!(split_at_char("aé日", 2), ("aé", "日"));
-        assert_eq!(split_at_char("aé日", 99), ("aé日", ""));
+        assert_eq!(crate::tui::widgets::split_at_char("aé日", 2), ("aé", "日"));
+        assert_eq!(crate::tui::widgets::split_at_char("aé日", 99), ("aé日", ""));
     }
 }

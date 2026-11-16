@@ -246,6 +246,8 @@ pub struct AppState {
     pub today: NaiveDate,
     /// Transient message shown on the next rendered status bar.
     pub message: Option<Message>,
+    /// Last known terminal height, used for bounded help scrolling.
+    pub viewport_height: u16,
 }
 
 impl AppState {
@@ -281,6 +283,7 @@ impl AppState {
             hide_done: false,
             today,
             message: None,
+            viewport_height: 24,
         }
     }
 

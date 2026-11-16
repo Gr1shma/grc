@@ -47,6 +47,7 @@ pub fn handle_normal(
         }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
+            app.help_scroll = 0;
             Vec::new()
         }
         KeyCode::Char(':') if app.focus == Focus::Right => selected_node(app)
@@ -555,14 +556,11 @@ pub fn handle_help(app: &mut AppState, code: KeyCode) -> Vec<Action> {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
             app.mode = Mode::Normal;
         }
-        KeyCode::Char('/') => {
-            app.filter_anchor = None;
-            app.left_state.select(Some(0));
-            app.right_state.select(Some(0));
-            app.mode = Mode::Filter;
-        }
         KeyCode::Char('j') | KeyCode::Down => {
-            app.help_scroll = app.help_scroll.saturating_add(1);
+            app.help_scroll = app
+                .help_scroll
+                .saturating_add(1)
+                .min(crate::tui::render::help::max_scroll(app.viewport_height));
         }
         KeyCode::Char('k') | KeyCode::Up => {
             app.help_scroll = app.help_scroll.saturating_sub(1);

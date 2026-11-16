@@ -10,6 +10,7 @@ use crate::tui::actions::{self, Action};
 use crate::tui::input;
 use crate::tui::state::{AppState, Mode, TreeItem};
 use crate::tui::task_ref::{TaskRef, get_task_refs_filtered};
+use crate::tui::theme::Theme;
 use crate::tui::tree::{
     build_visible_tree_items, clamp_left_selection, clamp_right_selection, selected_node,
 };
@@ -38,6 +39,8 @@ pub struct Engine {
     pub todo_list: TodoList,
     /// Ephemeral UI state.
     pub app: AppState,
+    /// Palette and glyphs, resolved once from the environment.
+    pub theme: Theme,
     /// Last stamp observed after a load or save.
     pub stamp: Option<FileStamp>,
     undo: VecDeque<TodoList>,
@@ -54,6 +57,7 @@ impl Engine {
             path: path.to_path_buf(),
             todo_list,
             app,
+            theme: Theme::from_env(),
             stamp,
             undo: VecDeque::new(),
             redo: Vec::new(),
@@ -201,7 +205,10 @@ impl Engine {
                     self.app.set_success("saved");
                 }
             }
-            Err(error) => self.app.set_error(format!("save failed: {error:#}")),
+            Err(error) => {
+                self.stamp = FileStamp::read(&self.path).ok().flatten();
+                self.app.set_error(format!("save failed: {error:#}"));
+            }
         }
     }
 
@@ -235,7 +242,10 @@ impl Engine {
                 self.app.set_success("overwrote disk changes");
                 self.refresh();
             }
-            Err(error) => self.app.set_error(format!("save failed: {error:#}")),
+            Err(error) => {
+                self.stamp = FileStamp::read(&self.path).ok().flatten();
+                self.app.set_error(format!("save failed: {error:#}"));
+            }
         }
     }
 

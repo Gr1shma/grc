@@ -10,7 +10,9 @@ pub mod input;
 pub mod render;
 pub mod state;
 pub mod task_ref;
+pub mod theme;
 pub mod tree;
+pub mod widgets;
 
 use crate::task::TodoList;
 use crate::tui::engine::Engine;
@@ -35,10 +37,10 @@ use std::sync::Arc;
 pub const LEFT_PANEL_PERCENT: u16 = 27;
 
 /// Help popup width percentage.
-pub const HELP_POPUP_WIDTH_PERCENT: u16 = 55;
+pub const HELP_POPUP_WIDTH_PERCENT: u16 = 70;
 
 /// Help popup height in rows.
-pub const HELP_POPUP_HEIGHT: u16 = 34;
+pub const HELP_POPUP_HEIGHT: u16 = 36;
 
 /// Run the TUI until the user quits.
 pub fn run_tui(path: &Path) -> Result<()> {
@@ -132,11 +134,18 @@ fn run_engine(terminal: &mut Terminal<CrosstermBackend<Stdout>>, path: &Path) ->
     let mut engine = Engine::load(path)?;
 
     loop {
+        let (columns, rows) = size()?;
+        engine.app.viewport_height = rows;
         terminal.draw(|frame| {
-            render::draw_ui(frame, &engine.todo_list, &mut engine.app, &engine.path)
+            render::draw_ui(
+                frame,
+                &engine.todo_list,
+                &engine.app,
+                &engine.theme,
+                &engine.path,
+            )
         })?;
 
-        let (columns, rows) = size()?;
         let area = Rect::new(0, 0, columns, rows);
 
         match event::read()? {
@@ -186,7 +195,10 @@ fn handle_help_mouse(app: &mut AppState, area: Rect, kind: MouseEventKind, colum
             app.help_scroll = app.help_scroll.saturating_sub(1);
         }
         MouseEventKind::ScrollDown => {
-            app.help_scroll = app.help_scroll.saturating_add(1);
+            app.help_scroll = app
+                .help_scroll
+                .saturating_add(1)
+                .min(render::help::max_scroll(app.viewport_height));
         }
         MouseEventKind::Down(MouseButton::Left) => {
             let popup = help_popup(area);

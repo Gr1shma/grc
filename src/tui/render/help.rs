@@ -1,137 +1,153 @@
+//! Scrollable keybinding overlay.
+
 use crate::tui::state::AppState;
+use crate::tui::theme::Theme;
+use crate::tui::widgets::popup;
 use crate::tui::{HELP_POPUP_HEIGHT, HELP_POPUP_WIDTH_PERCENT};
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
-};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Clear, Paragraph};
 
-/// Draw the help overlay and return the scroll offset clamped to its content.
-pub fn draw_help_overlay(f: &mut Frame, app: &AppState, area: Rect) -> u16 {
-    let popup = centered_rect(HELP_POPUP_WIDTH_PERCENT, HELP_POPUP_HEIGHT, area);
-    f.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(Span::styled(
-            " Keybindings Help ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ))
-        .border_style(Style::default().fg(Color::Yellow));
-
-    let content = vec![
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "  Global Commands:",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("    q            - Quit application"),
-        Line::from("    ?            - Toggle this help menu"),
-        Line::from("    /            - Filter tasks & sections (live search)"),
-        Line::from("    Esc (filter) - Clear filter and return to normal mode"),
-        Line::from("    Tab          - Switch panel focus (Left / Right)"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "  Left Panel (Sections):",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("    j / Down     - Move down the tree navigator"),
-        Line::from("    k / Up       - Move up the tree navigator"),
-        Line::from("    gg           - Jump to the top of the list"),
-        Line::from("    G            - Jump to the bottom of the list"),
-        Line::from("    l / Enter    - Focus right task list"),
-        Line::from("    a            - Add heading one level BELOW (child of current)"),
-        Line::from("    A            - Add heading one level UP (above current subtree)"),
-        Line::from("    o            - Add heading at SAME level, below current"),
-        Line::from("    O            - Add heading at SAME level, above current"),
-        Line::from("    i            - Rename selected heading"),
-        Line::from("    (nested headings supported: #, ##, ###, ####, ...)"),
-        Line::from("    dd           - Delete selected section or subsection instantly"),
-        Line::from("    yy / p       - Yank / paste item below (after current)"),
-        Line::from("    P            - Paste item above (one step up, like Shift+O)"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "  Right Panel (Tasks):",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("    j / Down     - Move down the task list"),
-        Line::from("    k / Up       - Move up the task list"),
-        Line::from("    gg           - Jump to the top of the list"),
-        Line::from("    G            - Jump to the bottom of the list"),
-        Line::from("    h / Esc      - Move focus back to sections tree"),
-        Line::from("    a / o        - Add new task below"),
-        Line::from("    O            - Add new task above"),
-        Line::from("    i            - Edit selected task text inline"),
-        Line::from("    t            - Set due date (empty = clear, Enter to confirm)"),
-        Line::from("    x / Space    - Toggle task status (Done / Todo)"),
-        Line::from("    yy / p       - Yank / paste item below (after current)"),
-        Line::from("    P            - Paste item above (one step up, like Shift+O)"),
-        Line::from("    dd           - Delete selected task"),
-        Line::from("    :            - Sort tasks by due date"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "  While Typing (any input mode):",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("    |            - Bar cursor marks your insert position"),
-        Line::from("    Left / Right - Move cursor within the text (vim-style)"),
-        Line::from("    Home / End   - Jump to start / end of the text"),
-        Line::from("    Backspace    - Delete character before cursor"),
-        Line::from("    Delete       - Delete character at cursor"),
-        Line::from("    Enter        - Confirm input"),
-        Line::from("    Esc          - Cancel input"),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "  Due Date Formats (used with t or inline):",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )]),
-        Line::from("    YYYY-MM-DD              - Absolute  e.g. 2025-12-31"),
-        Line::from("    today  /  tod  /  t     - Today"),
-        Line::from("    tomorrow  /  tmr  /  tmw  /  tom  - Tomorrow"),
-        Line::from("    next week  /  nextweek  /  nw     - 7 days from today"),
-        Line::from("    sun  /  mon  /  tue  /  wed  /  thu  /  fri  /  sat"),
-        Line::from("    sunday / monday / ...             - Next occurrence of weekday"),
-        Line::from("    +3d / -2w / +1m / +1y             - Relative offset"),
-        Line::from("    in 3 days / in 2 weeks            - Relative offset"),
-        Line::from("    jun 15 / june 15                  - Month name + day"),
-        Line::from("    Type due:DATE inline in task text (e.g. Buy milk due:tue)"),
-        Line::from(""),
-        Line::from("  Use Up/Down (j/k) to scroll. Press Esc, q, or ? to close"),
-    ];
-
-    let content_len = content.len();
-    let visible_height = popup.height.saturating_sub(2) as usize;
-    let max_scroll = content_len.saturating_sub(visible_height);
-    let max_scroll_u16 = u16::try_from(max_scroll).unwrap_or(u16::MAX);
-    let scroll = app.help_scroll.min(max_scroll_u16);
-
-    let para = Paragraph::new(content).block(block).scroll((scroll, 0));
-    f.render_widget(para, popup);
-    scroll
+/// Draw the help overlay. Scrolling is clamped only for display; input state
+/// owns the stored offset so rendering never mutates application state.
+pub fn draw_help_overlay(f: &mut Frame, app: &AppState, theme: &Theme, area: Rect) {
+    let popup_area = popup::centered(area, HELP_POPUP_WIDTH_PERCENT, HELP_POPUP_HEIGHT);
+    f.render_widget(Clear, popup_area);
+    let content = help_content(theme);
+    let visible = usize::from(popup_area.height.saturating_sub(2));
+    let max_scroll = content.len().saturating_sub(visible);
+    let scroll = usize::from(app.help_scroll).min(max_scroll) as u16;
+    let paragraph = Paragraph::new(content)
+        .block(popup::dialog(theme, "Keybindings"))
+        .scroll((scroll, 0));
+    f.render_widget(paragraph, popup_area);
 }
 
-fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let popup_width = area.width * percent_x / 100;
-    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    Rect {
-        x,
-        y,
-        width: popup_width.min(area.width),
-        height: height.min(area.height),
+/// Maximum useful stored scroll offset for a viewport height.
+pub fn max_scroll(viewport_height: u16) -> u16 {
+    let popup_height = HELP_POPUP_HEIGHT.min(viewport_height);
+    let visible = popup_height.saturating_sub(2);
+    let content = help_content(&Theme::plain()).len();
+    u16::try_from(content.saturating_sub(usize::from(visible))).unwrap_or(u16::MAX)
+}
+
+fn help_content(theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    group(
+        &mut lines,
+        theme,
+        "Navigate",
+        &[
+            ("j/k, ↓/↑", "move or scroll"),
+            ("gg / G", "top / bottom"),
+            ("5j / 3k", "count motion"),
+            ("l/Enter", "focus tasks"),
+            ("h/Esc/Tab", "back to sections"),
+            ("J / K", "move task/section"),
+            ("za / zM / zR", "fold / fold all / unfold all"),
+            ("]d", "next overdue"),
+            ("H", "hide/show completed"),
+            ("q / Ctrl-c", "quit"),
+        ],
+    );
+    group(
+        &mut lines,
+        theme,
+        "Edit",
+        &[
+            ("a / A", "new section below (level)"),
+            ("o / O", "new section below/above"),
+            ("i / dd", "rename / delete section"),
+            ("yy / p / P", "yank / paste below / above"),
+            ("a / A / o / O", "add task (A appends)"),
+            ("i / t", "edit text / due date"),
+            ("x / Space / Enter", "toggle task"),
+            ("dd / yy / p / P", "delete / yank / paste task"),
+            ("u / Ctrl-r", "undo / redo"),
+            (":", "sort section by due date"),
+        ],
+    );
+    group(
+        &mut lines,
+        theme,
+        "Dates",
+        &[
+            ("2025-12-31", "exact date"),
+            ("today | tod | t", "today"),
+            ("tomorrow | tmr", "tomorrow"),
+            ("tmw | tom", "tomorrow"),
+            ("next week | nextweek | nw", "7 days"),
+            ("mon .. sun", "strictly next weekday"),
+            ("this mon", "that weekday, today allowed"),
+            ("next mon", "strictly future weekday"),
+            ("+3d | -2w | +1m | +1y", "relative offset"),
+            ("in 3 days | jun 15", "offset or month + day"),
+            ("due:DATE", "inline in task text"),
+        ],
+    );
+    group(
+        &mut lines,
+        theme,
+        "Misc",
+        &[
+            ("/", "live filter"),
+            ("Esc", "clear filter"),
+            ("? / Esc / q", "open / close help"),
+            ("←/→, Home/End", "move text cursor"),
+            ("Ctrl-a / Ctrl-e", "start / end of input"),
+            ("Backspace / Delete", "delete before / at cursor"),
+            ("Enter / Esc", "confirm / cancel input"),
+            ("wheel / click", "scroll / select a row"),
+            ("NO_COLOR=1", "disable colour"),
+            ("GRC_ASCII=1", "ASCII checkboxes and folds"),
+        ],
+    );
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  j/k or the mouse wheel scrolls this help.",
+        theme.help_text(),
+    )));
+    lines
+}
+
+fn group(lines: &mut Vec<Line<'static>>, theme: &Theme, title: &str, entries: &[(&str, &str)]) {
+    if !lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        format!("  {title}"),
+        theme.help_heading(),
+    )));
+    for (key, description) in entries {
+        lines.push(Line::from(vec![
+            Span::styled("    ", theme.help_text()),
+            Span::styled(format!("{key:<20}"), theme.help_key()),
+            Span::styled((*description).to_string(), theme.help_text()),
+        ]));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_has_all_four_groups() {
+        let text: String = help_content(&Theme::plain())
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+        for heading in ["Navigate", "Edit", "Dates", "Misc"] {
+            assert!(text.contains(heading), "missing {heading}");
+        }
+    }
+
+    #[test]
+    fn max_scroll_is_bounded() {
+        assert!(max_scroll(40) < max_scroll(10));
+        assert_eq!(max_scroll(0), max_scroll(1));
     }
 }
