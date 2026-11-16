@@ -221,34 +221,49 @@ pub(crate) fn help_popup(area: Rect) -> Rect {
 }
 
 fn handle_click(app: &mut AppState, todo_list: &TodoList, area: Rect, column: u16, row: u16) {
-    let Some(row_index) = row.checked_sub(1).map(usize::from) else {
+    // Row 0 is a panel border and the last two rows are the hint and status
+    // bars, so a click only names a list row between them.
+    let Some(list_row) = row.checked_sub(1).map(usize::from) else {
         return;
     };
-    if row_index + 2 >= area.height as usize {
+    if row + 2 >= area.height {
         return;
     }
 
-    let left_width = widgets::percentage(area.width, LEFT_PANEL_PERCENT);
-    if column < left_width {
+    // The panels sit above the hint and status bars; splitting the full area
+    // would give them two rows too many and misplace every scrolled click.
+    let panel_area = Rect::new(0, 0, area.width, area.height.saturating_sub(2));
+    let [left, right] = render::panel_split(panel_area);
+    if column < left.x + left.width {
         app.focus = Focus::Left;
-        if row_index < app.tree_items.len() {
-            app.left_state.select(Some(row_index));
+        let total = app.tree_items.len();
+        let index = list_row + visible_offset(app.left_state.selected(), total, left);
+        if index < total {
+            app.left_state.select(Some(index));
         }
         return;
     }
 
-    app.focus = Focus::Right;
-    if let Some(node) = selected_node(app) {
-        let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower, app.hide_done);
-        if row_index < refs.len() {
-            app.right_state.select(Some(row_index));
-            return;
-        }
-    }
-    let row_count = selected_node(app).map_or(0, |node| {
-        get_task_refs_filtered(todo_list, &node, &app.filter_lower, app.hide_done).len()
+    let node = selected_node(app);
+    let row_count = node.as_ref().map_or(0, |node| {
+        get_task_refs_filtered(todo_list, node, &app.filter_lower, app.hide_done).len()
     });
+    app.focus = Focus::Right;
+    let index = list_row + visible_offset(app.right_state.selected(), row_count, right);
+    if index < row_count {
+        app.right_state.select(Some(index));
+        return;
+    }
     clamp_right_selection(app, row_count);
+}
+
+/// First visible list row of a panel, matching what the renderer draws.
+///
+/// Clicking must resolve against the scrolled view, not the raw document, so a
+/// click on a scrolled list selects the row the user actually sees.
+fn visible_offset(selected: Option<usize>, total: usize, panel: Rect) -> usize {
+    let height = usize::from(panel.height.saturating_sub(2));
+    selected.map_or(0, |selected| widgets::list_offset(total, selected, height))
 }
 
 fn scroll(app: &mut AppState, todo_list: &TodoList, delta: isize) {
@@ -289,6 +304,68 @@ mod tests {
     fn percentage_does_not_overflow() {
         assert_eq!(widgets::percentage(u16::MAX, 55), 36044);
         assert_eq!(widgets::percentage(100, 27), 27);
+    }
+
+    fn click_area() -> Rect {
+        // 14 rows leaves a 12-row panel, so ten list rows fit inside the border.
+        Rect::new(0, 0, 40, 14)
+    }
+
+    fn state_with_tasks(count: usize) -> (TodoList, AppState) {
+        let mut content = String::from("# main\n");
+        for index in 0..count {
+            content.push_str(&format!("- [ ] task {index}\n"));
+        }
+        let todo = crate::parser::parse_str(&content);
+        let mut app = AppState::new(1);
+        app.tree_items = crate::tui::tree::build_visible_tree_items(
+            &todo,
+            &app.mode,
+            &app.filter_lower,
+            &app.folded,
+            app.hide_done,
+        );
+        (todo, app)
+    }
+
+    #[test]
+    fn click_resolves_against_the_scrolled_view() {
+        let (todo, mut app) = state_with_tasks(20);
+        app.focus = Focus::Right;
+        // Selecting row 15 scrolls the list so that row 6 is the first visible one.
+        app.right_state.select(Some(15));
+        let [_, right] = render::panel_split(Rect::new(0, 0, 40, 12));
+        assert_eq!(visible_offset(Some(15), 20, right), 6);
+
+        handle_click(&mut app, &todo, click_area(), right.x + 2, 1);
+        assert_eq!(app.focus, Focus::Right);
+        assert_eq!(app.right_state.selected(), Some(6));
+    }
+
+    #[test]
+    fn click_uses_the_same_panel_boundary_as_the_renderer() {
+        let (todo, mut app) = state_with_tasks(1);
+        app.focus = Focus::Right;
+        let area = click_area();
+        let [left, right] = render::panel_split(area);
+        assert_eq!(left.width + right.width, area.width);
+
+        // The last cell of the left panel, then the first cell of the right one.
+        handle_click(&mut app, &todo, area, left.width - 1, 1);
+        assert_eq!(app.focus, Focus::Left);
+        handle_click(&mut app, &todo, area, left.width, 1);
+        assert_eq!(app.focus, Focus::Right);
+    }
+
+    #[test]
+    fn clicks_on_the_chrome_or_borders_are_ignored() {
+        let (todo, mut app) = state_with_tasks(3);
+        app.focus = Focus::Right;
+        app.right_state.select(Some(2));
+        for row in [0, 13] {
+            handle_click(&mut app, &todo, click_area(), 5, row);
+        }
+        assert_eq!(app.right_state.selected(), Some(2));
     }
 
     #[test]

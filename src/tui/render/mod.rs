@@ -5,12 +5,28 @@ use crate::tui::state::{AppState, Mode};
 use crate::tui::theme::Theme;
 use crate::tui::widgets::{hint, status};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use std::path::Path;
 
 pub(crate) mod help;
 mod left;
 mod right;
+
+/// Horizontal split between the section tree and the task panel.
+///
+/// Shared with mouse hit-testing so a click can never land in a different panel
+/// from the one that was drawn under the cursor; ratatui's percentage rounding
+/// is not reproducible with a plain `width * percent / 100`.
+pub fn panel_split(area: Rect) -> [Rect; 2] {
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(crate::tui::LEFT_PANEL_PERCENT),
+            Constraint::Percentage(100 - crate::tui::LEFT_PANEL_PERCENT),
+        ])
+        .split(area);
+    [panels[0], panels[1]]
+}
 
 /// Draw the whole interface from immutable state.
 pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Theme, path: &Path) {
@@ -24,16 +40,9 @@ pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Them
         ])
         .split(area);
 
-    let panels = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(crate::tui::LEFT_PANEL_PERCENT),
-            Constraint::Percentage(100 - crate::tui::LEFT_PANEL_PERCENT),
-        ])
-        .split(chunks[0]);
-
-    left::draw_left(f, todo_list, app, theme, panels[0]);
-    right::draw_right(f, todo_list, app, theme, panels[1]);
+    let [left_area, right_area] = panel_split(chunks[0]);
+    left::draw_left(f, todo_list, app, theme, left_area);
+    right::draw_right(f, todo_list, app, theme, right_area);
     hint::draw(f, app, chunks[1], theme);
     status::draw(f, todo_list, app, path, chunks[2], theme);
 
