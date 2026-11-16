@@ -110,7 +110,7 @@ ignore it.
 | `yy` / `p` / `P` | Yank section / paste below / paste above |
 | `J` / `K` | Move the section down / up among its siblings |
 | `za` / `zM` / `zR` | Toggle fold / fold all / unfold all |
-| `]d` | Jump to the next overdue task and focus the task panel |
+| `]d` | Jump to the next overdue task in the file and focus the task panel |
 
 ### Tasks panel (right)
 
@@ -125,8 +125,13 @@ ignore it.
 | `yy` / `p` / `P` | Yank task / paste below / paste above |
 | `:` | Recursively sort the selected section by due date |
 | `J` / `K` | Move the task down / up among its visible siblings |
-| `]d` | Jump to the next overdue task in the file (wraps, skips completed) |
+| `]d` | Jump to the next overdue task in the file (wraps, skips completed; reveals it if a fold or the filter hides it) |
 | `H` | Hide or show completed tasks |
+
+`]d` looks through the whole file rather than the rows on screen. If the overdue
+task is inside a folded section its ancestors are unfolded, and if the active
+filter hides it the filter is cleared — the status bar says which of the two
+happened. A filter that does not hide the target is left alone.
 
 ### Text inputs, filter, help, and conflict
 

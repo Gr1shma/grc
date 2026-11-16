@@ -813,6 +813,95 @@ mod tests {
     }
 
     #[test]
+    fn next_overdue_unfolds_the_ancestors_of_a_hidden_task() {
+        let today = NaiveDate::from_ymd_opt(2025, 7, 21).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let content = format!(
+            "# first\n- [ ] nothing due\n## buried\n- [ ] late due:{}\n",
+            yesterday.format("%Y-%m-%d"),
+        );
+        let (_dir, mut engine) = engine(&content);
+        engine.app.today = today;
+        engine.refresh();
+        engine.app.folded.insert(vec![0]);
+        engine.refresh();
+        assert_eq!(engine.app.tree_items.len(), 1, "the subtree starts folded");
+
+        press(&mut engine, KeyCode::Char(']'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert!(
+            engine.app.folded.is_empty(),
+            "reaching the task unfolds its ancestors"
+        );
+        assert_eq!(
+            crate::tui::tree::selected_node(&engine.app),
+            Some(vec![0, 0])
+        );
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+        assert_eq!(engine.app.focus, Focus::Right);
+        assert_eq!(
+            engine.app.message.as_ref().unwrap().text,
+            "next overdue task — unfolded to reach it"
+        );
+    }
+
+    #[test]
+    fn next_overdue_clears_a_filter_that_hides_the_task() {
+        let today = NaiveDate::from_ymd_opt(2025, 7, 21).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let content = format!(
+            "# first\n- [ ] nothing due\n# second\n- [ ] late due:{}\n",
+            yesterday.format("%Y-%m-%d"),
+        );
+        let (_dir, mut engine) = engine(&content);
+        engine.app.today = today;
+        engine.app.set_filter("nothing".into());
+        engine.refresh();
+
+        press(&mut engine, KeyCode::Char(']'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert_eq!(
+            crate::tui::tree::selected_node(&engine.app),
+            Some(vec![1]),
+            "the filter must not hide the jump target"
+        );
+        assert_eq!(engine.app.filter, "");
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+        assert_eq!(
+            engine.app.message.as_ref().unwrap().text,
+            "next overdue task — filter cleared to reach it"
+        );
+    }
+
+    #[test]
+    fn next_overdue_keeps_a_filter_that_does_not_hide_the_task() {
+        let today = NaiveDate::from_ymd_opt(2025, 7, 21).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let content = format!(
+            "# first\n- [ ] late due:{}\n# second\n- [ ] later due:{}\n",
+            yesterday.format("%Y-%m-%d"),
+            yesterday.format("%Y-%m-%d"),
+        );
+        let (_dir, mut engine) = engine(&content);
+        engine.app.today = today;
+        engine.app.set_filter("late".into());
+        engine.refresh();
+
+        press(&mut engine, KeyCode::Char(']'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert_eq!(engine.app.filter, "late", "a harmless filter stays");
+        assert_eq!(
+            crate::tui::tree::selected_node(&engine.app),
+            Some(vec![1]),
+            "the jump moves on from the task it was sitting on"
+        );
+        assert_eq!(
+            engine.app.message.as_ref().unwrap().text,
+            "next overdue task"
+        );
+    }
+
+    #[test]
     fn shift_j_and_k_reorder_tasks_and_sections() {
         let (_dir, mut engine) = engine("# a\n- [ ] A\n- [ ] B\n# b\n- [ ] Bb\n");
         engine.app.focus = Focus::Right;

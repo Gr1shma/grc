@@ -7,7 +7,7 @@
 │           │    h/Esc/Tab           back to sections              │           │
 │           │    J / K               move task/section             │           │
 │           │    za / zM / zR        fold / fold all / unfold all  │           │
-│           │    ]d                  next overdue task in the file │           │
+│           │    ]d                  next overdue task (unfolds, cl│           │
 │           │    H                   hide/show completed           │           │
 │           │    q / Ctrl-c          quit                          │           │
 │           │                                                      │           │

@@ -10,7 +10,7 @@ use crate::tui::state::{
     TextField, TreeItem,
 };
 use crate::tui::task_ref::{TaskRef, get_task_from_ref, get_task_refs_filtered};
-use crate::tui::tree::{node_level, node_name, selected_node};
+use crate::tui::tree::{build_visible_tree_items, node_level, node_name, selected_node};
 use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashSet;
 
@@ -480,8 +480,15 @@ fn collect_foldable(parent: Option<&NodePath>, children: &[Section], out: &mut H
     }
 }
 
+/// Jump to the next overdue task in the file, revealing it if it is hidden.
+///
+/// The overdue task is looked up in the whole document, not in the rows the
+/// filter and the folds currently show: `]d` is documented as "in the file", so
+/// a task inside a folded section or behind an active filter is *revealed*
+/// (ancestors unfolded, filter cleared) rather than skipped. The status bar
+/// says which of the two had to happen.
 fn jump_to_next_overdue(app: &mut AppState, todo_list: &TodoList) {
-    let refs = visible_tasks_in_document_order(app, todo_list);
+    let refs = all_tasks_in_document_order(todo_list);
     if refs.is_empty() {
         app.set_info("no overdue tasks");
         return;
@@ -505,6 +512,7 @@ fn jump_to_next_overdue(app: &mut AppState, todo_list: &TodoList) {
     };
 
     let target = refs[index].clone();
+    let revealed = reveal(app, todo_list, &target);
     app.focus = Focus::Right;
     if let Some(row) = app
         .tree_items
@@ -519,28 +527,76 @@ fn jump_to_next_overdue(app: &mut AppState, todo_list: &TodoList) {
             reference.node == target.node && reference.task_idx == target.task_idx
         });
     app.right_state.select(row);
-    app.set_info("next overdue task");
+    app.set_info(revealed.message());
 }
 
-/// Every visible task in document order, including sections other than the
-/// selected one.
-///
-/// `get_task_refs_filtered` already flattens descendants for a top-level
-/// section, so each node contributes only the tasks it owns; otherwise a nested
-/// task would appear once per ancestor.
-fn visible_tasks_in_document_order(app: &AppState, todo_list: &TodoList) -> Vec<TaskRef> {
-    let mut refs = Vec::new();
-    for item in &app.tree_items {
-        let TreeItem::Node(path) = item else {
-            continue;
-        };
-        refs.extend(
-            refs_for(app, todo_list, path)
-                .into_iter()
-                .filter(|reference| reference.node == *path),
-        );
+/// What had to change for the jumped-to task to become visible.
+#[derive(Default)]
+struct Reveal {
+    unfolded: bool,
+    filter_cleared: bool,
+}
+
+impl Reveal {
+    fn message(&self) -> String {
+        match (self.unfolded, self.filter_cleared) {
+            (false, false) => "next overdue task".to_string(),
+            (true, false) => "next overdue task — unfolded to reach it".to_string(),
+            (false, true) => "next overdue task — filter cleared to reach it".to_string(),
+            (true, true) => "next overdue task — unfolded and filter cleared".to_string(),
+        }
     }
-    refs
+}
+
+/// Unfold the target's ancestors and drop a filter that still hides it, then
+/// rebuild the tree so the caller can select the row that now exists.
+fn reveal(app: &mut AppState, todo_list: &TodoList, target: &TaskRef) -> Reveal {
+    let mut reveal = Reveal::default();
+    for depth in 0..target.node.len() {
+        reveal.unfolded |= app.folded.remove(&target.node[..depth]);
+    }
+    rebuild_tree(app, todo_list);
+    if !app.filter.is_empty() && !is_reachable(app, todo_list, target) {
+        app.clear_filter();
+        reveal.filter_cleared = true;
+        rebuild_tree(app, todo_list);
+    }
+    reveal
+}
+
+/// Rebuild the visible tree after the folds or the filter changed.
+fn rebuild_tree(app: &mut AppState, todo_list: &TodoList) {
+    app.tree_items = build_visible_tree_items(
+        todo_list,
+        &app.mode,
+        &app.filter_lower,
+        &app.folded,
+        app.hide_done,
+    );
+}
+
+/// Whether the folds and the filter leave the task on screen, both as a tree
+/// row and as a task row of that section.
+fn is_reachable(app: &AppState, todo_list: &TodoList, target: &TaskRef) -> bool {
+    let node_visible = app
+        .tree_items
+        .iter()
+        .any(|item| matches!(item, TreeItem::Node(path) if path == &target.node));
+    node_visible
+        && refs_for(app, todo_list, &target.node)
+            .iter()
+            .any(|reference| reference.node == target.node && reference.task_idx == target.task_idx)
+}
+
+/// Every task in the file in document order, whether or not the filter, the
+/// folds, or `H` currently show it.
+///
+/// `get_task_refs` already flattens descendants for a top-level section, so
+/// each top-level section is walked exactly once and no task is listed twice.
+fn all_tasks_in_document_order(todo_list: &TodoList) -> Vec<TaskRef> {
+    (0..todo_list.sections.len())
+        .flat_map(|index| crate::tui::task_ref::get_task_refs(todo_list, &vec![index]).into_iter())
+        .collect()
 }
 
 fn remember_selection(app: &mut AppState, todo_list: &TodoList) {

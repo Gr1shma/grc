@@ -51,7 +51,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
             ("h/Esc/Tab", "back to sections"),
             ("J / K", "move task/section"),
             ("za / zM / zR", "fold / fold all / unfold all"),
-            ("]d", "next overdue task in the file"),
+            ("]d", "next overdue task (unfolds, clears filter)"),
             ("H", "hide/show completed"),
             ("q / Ctrl-c", "quit"),
         ],
