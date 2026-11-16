@@ -1,7 +1,7 @@
 use crate::task::{Task, TodoList};
 use crate::tui::state::{AppState, Focus, Mode};
-use crate::tui::task_ref::full_breadcrumb;
-use crate::tui::{get_task_from_ref, get_task_refs_filtered, selected_node};
+use crate::tui::task_ref::{TaskRef, full_breadcrumb, get_task_from_ref, get_task_refs_filtered};
+use crate::tui::tree::selected_node;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -12,7 +12,7 @@ use ratatui::{
 
 pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: Rect) {
     let focused_normal = app.focus == Focus::Right && matches!(app.mode, Mode::Normal);
-    let in_task_input = matches!(app.mode, Mode::InputTask { .. } | Mode::InputDue { .. });
+    let in_task_input = matches!(app.mode, Mode::InputTask(_) | Mode::InputDue(_));
 
     let title = selected_node(app).map_or_else(
         || " Tasks ".to_string(),
@@ -41,46 +41,31 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
 
     let inner_w = area.width.saturating_sub(6) as usize;
 
-    let (editing_idx, edit_buf, edit_cursor) = match &app.mode {
-        Mode::InputTask {
-            editing_idx,
-            buf,
-            cursor,
-            ..
-        } => (*editing_idx, Some(buf.as_str()), *cursor),
-        _ => (None, None, 0),
+    let (editing_idx, edit_field) = match &app.mode {
+        Mode::InputTask(input) => (input.editing_idx, Some(&input.field)),
+        _ => (None, None),
     };
 
-    let (due_editing_idx, due_buf, due_cursor) = match &app.mode {
-        Mode::InputDue {
-            task_idx,
-            buf,
-            cursor,
-        } => (Some(*task_idx), Some(buf.as_str()), *cursor),
-        _ => (None, None, 0),
+    let (due_target, due_field) = match &app.mode {
+        Mode::InputDue(input) => (Some(&input.target), Some(&input.field)),
+        _ => (None, None),
     };
 
     let render_ctx = TaskRenderCtx {
         editing_idx,
-        edit_buf,
-        edit_cursor,
-        due_editing_idx,
-        due_buf,
-        due_cursor,
+        edit_buf: edit_field.map(|field| field.buf.as_str()),
+        edit_cursor: edit_field.map_or(0, |field| field.cursor),
+        due_target,
+        due_field,
     };
 
     let mut items = build_task_list_items(todo_list, &task_refs, render_ctx, inner_w);
 
-    if let Mode::InputTask {
-        editing_idx: None,
-        insert_idx,
-        above: _,
-        ref buf,
-        cursor,
-    } = app.mode
+    if let Mode::InputTask(input) = &app.mode
+        && input.editing_idx.is_none()
     {
-        let ghost = render_ghost_row(buf, cursor, inner_w);
-        let pos = insert_idx.unwrap_or(items.len()).min(items.len());
+        let ghost = render_ghost_row(&input.field.buf, input.field.cursor, inner_w);
+        let pos = input.insert_idx.unwrap_or(items.len()).min(items.len());
         items.insert(pos, ghost);
     }
 
@@ -124,14 +109,13 @@ struct TaskRenderCtx<'a> {
     editing_idx: Option<usize>,
     edit_buf: Option<&'a str>,
     edit_cursor: usize,
-    due_editing_idx: Option<usize>,
-    due_buf: Option<&'a str>,
-    due_cursor: usize,
+    due_target: Option<&'a TaskRef>,
+    due_field: Option<&'a crate::tui::state::TextField>,
 }
 
 fn build_task_list_items(
     todo_list: &TodoList,
-    task_refs: &[crate::tui::TaskRef],
+    task_refs: &[TaskRef],
     ctx: TaskRenderCtx<'_>,
     inner_w: usize,
 ) -> Vec<ListItem<'static>> {
@@ -151,11 +135,12 @@ fn build_task_list_items(
                     inner_w,
                     ref_item.sub_name.as_deref(),
                 )
-            } else if Some(i) == ctx.due_editing_idx {
+            } else if ctx.due_target == Some(ref_item) {
+                let field = ctx.due_field.expect("due field exists for due target");
                 render_due_editing_row(
                     task,
-                    ctx.due_buf.unwrap_or(""),
-                    ctx.due_cursor,
+                    &field.buf,
+                    field.cursor,
                     inner_w,
                     ref_item.sub_name.as_deref(),
                 )

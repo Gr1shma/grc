@@ -15,8 +15,7 @@ mod left;
 mod right;
 
 pub fn split_at_char(s: &str, char_idx: usize) -> (&str, &str) {
-    let byte = s.char_indices().nth(char_idx).map_or(s.len(), |(b, _)| b);
-    (&s[..byte], &s[byte..])
+    crate::tui::input::text::split_at_char(s, char_idx)
 }
 
 pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &mut AppState) {
@@ -41,7 +40,7 @@ pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &mut AppState) {
     draw_filter_bar(f, app, chunks[1]);
 
     if matches!(app.mode, Mode::Help) {
-        draw_help_overlay(f, app, area);
+        app.help_scroll = draw_help_overlay(f, app, area);
     }
 }
 

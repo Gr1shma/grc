@@ -10,7 +10,7 @@ use ratatui::{
 
 pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: Rect) {
     let focused = app.focus == Focus::Left && matches!(app.mode, Mode::Normal);
-    let renaming = matches!(app.mode, Mode::InputSection { .. });
+    let renaming = matches!(app.mode, Mode::InputSection(_));
 
     let border_color = if renaming || focused {
         Color::Cyan
@@ -34,20 +34,13 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         ))
         .border_style(Style::default().fg(border_color));
 
-    let (renaming_node, rename_buf, rename_cursor) = match &app.mode {
-        Mode::InputSection {
-            node, buf, cursor, ..
-        } => (node.as_ref(), Some(buf.as_str()), *cursor),
-        _ => (None, None, 0),
+    let (renaming_node, rename_field) = match &app.mode {
+        Mode::InputSection(input) => (input.node.as_ref(), Some(&input.field)),
+        _ => (None, None),
     };
 
     let ghost = match &app.mode {
-        Mode::InputSection {
-            node: None,
-            buf,
-            cursor,
-            ..
-        } => Some((buf.as_str(), *cursor)),
+        Mode::InputSection(input) if input.node.is_none() => Some(&input.field),
         _ => None,
     };
 
@@ -56,7 +49,8 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
         .iter()
         .map(|item| match item {
             TreeItem::Ghost(depth) => {
-                let (buf, cursor) = ghost.unwrap_or(("", 0));
+                let (buf, cursor) =
+                    ghost.map_or(("", 0), |field| (field.buf.as_str(), field.cursor));
                 let (before, after) = crate::tui::render::split_at_char(buf, cursor);
                 ListItem::new(Line::from(vec![
                     Span::styled(indent(*depth), Style::default().fg(Color::Green)),
@@ -73,8 +67,9 @@ pub fn draw_left(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area: 
             TreeItem::Node(path) => {
                 let depth = path.len().saturating_sub(1);
                 if Some(path) == renaming_node {
+                    let field = rename_field.expect("rename field exists for rename node");
                     let (before, after) =
-                        crate::tui::render::split_at_char(rename_buf.unwrap_or(""), rename_cursor);
+                        crate::tui::render::split_at_char(&field.buf, field.cursor);
                     ListItem::new(Line::from(vec![
                         Span::styled(indent(depth), Style::default().fg(Color::Cyan)),
                         Span::styled(before, Style::default().fg(Color::White)),

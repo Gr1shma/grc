@@ -1,731 +1,374 @@
+//! Terminal lifecycle and the main event loop.
+//!
+//! `run_tui` owns raw mode, the alternate screen, and mouse capture. A guard
+//! restores all three on normal exit, on error, and during panic unwinding.
+//! `run_engine` owns the document and UI state but no terminal setup.
+
 pub mod input;
 pub mod render;
-pub mod section_ops;
 pub mod state;
 pub mod task_ref;
 pub mod tree;
 
-pub use section_ops::*;
-pub use task_ref::*;
-pub use tree::*;
-
 use crate::parser::parse_file;
 use crate::task::TodoList;
-use crate::tui::input::{InputDueParams, InputSectionParams, InputTaskParams};
 use crate::tui::state::{AppState, Focus, Mode, TreeItem};
+use crate::tui::task_ref::{TaskRef, get_task_refs_filtered};
+use crate::tui::tree::{
+    build_visible_tree_items, clamp_left_selection, clamp_right_selection, selected_node,
+};
 use anyhow::{Context, Result};
-use crossterm::{
-    event::{self, Event, KeyModifiers, MouseButton, MouseEvent},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size},
+use crossterm::event::{self, Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
-use std::io::{self, stdout};
+use std::io::{self, Stdout};
 use std::path::Path;
 
-/// Width of the left (sections) panel as a percentage of the terminal width.
-/// Shared by the renderer and mouse hit-testing so they can never diverge.
+/// Width of the section panel as a percentage of terminal width.
 pub const LEFT_PANEL_PERCENT: u16 = 27;
 
-/// Help popup size: width percentage and row height. Shared by the help
-/// renderer and the click-outside-to-close hit test.
+/// Help popup width percentage.
 pub const HELP_POPUP_WIDTH_PERCENT: u16 = 55;
+
+/// Help popup height in rows.
 pub const HELP_POPUP_HEIGHT: u16 = 34;
 
+/// Run the TUI until the user quits.
 pub fn run_tui(path: &Path) -> Result<()> {
-    enable_raw_mode().context("enable raw mode")?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen).context("enter alternate screen")?;
-    execute!(out, event::EnableMouseCapture).context("enable mouse capture")?;
-    let backend = CrosstermBackend::new(out);
-    let mut term = Terminal::new(backend).context("create terminal")?;
-
-    // Guard struct ensures terminal cleanup even on panic
-    struct TerminalGuard<'a> {
-        term: &'a mut Terminal<CrosstermBackend<io::Stdout>>,
-    }
-    impl<'a> Drop for TerminalGuard<'a> {
-        fn drop(&mut self) {
-            let _ = disable_raw_mode();
-            let _ = execute!(self.term.backend_mut(), LeaveAlternateScreen);
-            let _ = self.term.show_cursor();
-            let _ = execute!(self.term.backend_mut(), event::DisableMouseCapture);
-        }
-    }
-
-    let guard = TerminalGuard { term: &mut term };
+    let mut session = TerminalSession::enter()?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_engine(guard.term, path)
+        run_engine(&mut session.terminal, path)
     }));
-
-    drop(guard); // Cleanup runs here
+    drop(session);
 
     match result {
-        Ok(inner_result) => inner_result,
-        Err(panic) => {
-            let msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = panic.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "Unknown panic".to_string()
-            };
-            Err(anyhow::anyhow!("TUI panicked: {}", msg))
+        Ok(result) => result,
+        Err(panic) => Err(anyhow::anyhow!(
+            "TUI panicked: {}",
+            panic_message(panic.as_ref())
+        )),
+    }
+}
+
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "Unknown panic".to_string()
+    }
+}
+
+/// Terminal state that must be restored on every exit path.
+struct TerminalSession {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+}
+
+impl TerminalSession {
+    fn enter() -> Result<Self> {
+        enable_raw_mode().context("enable raw mode")?;
+
+        let terminal = (|| -> Result<Terminal<CrosstermBackend<Stdout>>> {
+            let mut out = io::stdout();
+            execute!(out, EnterAlternateScreen).context("enter alternate screen")?;
+            execute!(out, event::EnableMouseCapture).context("enable mouse capture")?;
+            Terminal::new(CrosstermBackend::new(out)).context("create terminal")
+        })();
+
+        match terminal {
+            Ok(terminal) => Ok(Self { terminal }),
+            Err(error) => {
+                restore_terminal(None);
+                Err(error)
+            }
         }
     }
 }
 
-fn run_engine(term: &mut Terminal<CrosstermBackend<io::Stdout>>, path: &Path) -> Result<()> {
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        restore_terminal(Some(&mut self.terminal));
+    }
+}
+
+fn restore_terminal(terminal: Option<&mut Terminal<CrosstermBackend<Stdout>>>) {
+    let _ = disable_raw_mode();
+    match terminal {
+        Some(terminal) => {
+            let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+            let _ = execute!(terminal.backend_mut(), event::DisableMouseCapture);
+            let _ = terminal.show_cursor();
+        }
+        None => {
+            let mut out = io::stdout();
+            let _ = execute!(out, LeaveAlternateScreen);
+            let _ = execute!(out, event::DisableMouseCapture);
+        }
+    }
+}
+
+fn run_engine(terminal: &mut Terminal<CrosstermBackend<Stdout>>, path: &Path) -> Result<()> {
     let mut todo_list = parse_file(path)?;
     let mut app = AppState::new(todo_list.sections.len());
 
     loop {
-        app.tree_items = build_visible_tree_items(&todo_list, &app.mode, &app.filter_lower);
-        if let Some(node) = app.filter_restore_node.take()
-            && let Some(pos) = app
-                .tree_items
-                .iter()
-                .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
-        {
-            app.left_state.select(Some(pos));
-            if let (Some(task_node), Some(task_idx)) = (
-                app.filter_restore_task_node.take(),
-                app.filter_restore_task_idx.take(),
-            ) {
-                let refs = get_task_refs_filtered(&todo_list, &node, "");
-                if let Some(new_pos) = refs
-                    .iter()
-                    .position(|r| r.node == task_node && r.task_idx == task_idx)
-                {
-                    app.right_state.select(Some(new_pos));
-                } else {
-                    app.right_state.select(Some(0));
-                }
-            } else {
-                app.right_state.select(Some(0));
-            }
-        }
-        sync_selection_states(&mut app, &todo_list);
-        term.draw(|f| render::draw_ui(f, &todo_list, &mut app))?;
+        refresh_view(&mut app, &todo_list);
+        terminal.draw(|frame| render::draw_ui(frame, &todo_list, &mut app))?;
 
         let (columns, rows) = size()?;
         let area = Rect::new(0, 0, columns, rows);
 
         match event::read()? {
-            Event::Key(key) if key.modifiers.contains(KeyModifiers::CONTROL)
-                && key.code == event::KeyCode::Char('c') =>
+            Event::Key(key)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && key.code == event::KeyCode::Char('c') =>
             {
                 break;
             }
-
             Event::Key(key) => {
-                let quit = match &app.mode {
-                    Mode::Normal => input::handle_normal(&mut app, &mut todo_list, path, key.code)?,
-                    Mode::Help => {
-                        if key.code == event::KeyCode::Esc
-                            || key.code == event::KeyCode::Char('q')
-                            || key.code == event::KeyCode::Char('?')
-                        {
-                            app.mode = Mode::Normal;
-                        } else if key.code == event::KeyCode::Char('/') {
-                            app.mode = Mode::Filter;
-                            app.left_state.select(Some(0));
-                            app.right_state.select(Some(0));
-                        } else if key.code == event::KeyCode::Down || key.code == event::KeyCode::Char('j') {
-                            app.help_scroll = app.help_scroll.saturating_add(1);
-                        } else if key.code == event::KeyCode::Up || key.code == event::KeyCode::Char('k') {
-                            app.help_scroll = app.help_scroll.saturating_sub(1);
-                        }
-                        false
-                    }
-                    Mode::InputTask {
-                        editing_idx,
-                        insert_idx,
-                        above,
-                        buf,
-                        cursor,
-                    } => {
-                        let mut params = InputTaskParams {
-                            editing_idx: *editing_idx,
-                            insert_idx: *insert_idx,
-                            above: *above,
-                            buf: buf.clone(),
-                            cursor: *cursor,
-                        };
-                        input::handle_input_task(
-                            &mut app,
-                            &mut todo_list,
-                            path,
-                            key.code,
-                            key.modifiers,
-                            &mut params,
-                        )?;
-                        false
-                    }
-                    Mode::InputDue {
-                        task_idx,
-                        buf,
-                        cursor,
-                    } => {
-                        let mut params = InputDueParams {
-                            task_idx: *task_idx,
-                            buf: buf.clone(),
-                            cursor: *cursor,
-                        };
-                        input::handle_input_due(&mut app, &mut todo_list, path, key.code, key.modifiers, &mut params)?;
-                        false
-                    }
-                    Mode::InputSection {
-                        node,
-                        parent,
-                        insert_idx,
-                        buf,
-                        cursor,
-                    } => {
-                        let mut params = InputSectionParams {
-                            node: node.clone(),
-                            parent: parent.clone(),
-                            insert_idx: *insert_idx,
-                            buf: buf.clone(),
-                            cursor: *cursor,
-                        };
-                        input::handle_input_section(
-                            &mut app,
-                            &mut todo_list,
-                            path,
-                            key.code,
-                            key.modifiers,
-                            &mut params,
-                        )?;
-                        false
-                    }
-                    Mode::Filter => {
-                        input::handle_filter(&mut app, &todo_list, key.code)?;
-                        false
-                    }
-                };
-
-                if quit {
+                if input::handle_key(&mut app, &mut todo_list, path, key.code, key.modifiers)? {
                     break;
                 }
             }
-
-            Event::Mouse(evt) => handle_mouse(&mut app, &todo_list, area, evt),
-
+            Event::Mouse(mouse) => handle_mouse(&mut app, &todo_list, area, mouse),
             Event::Resize(_, _) => {}
-
             _ => {}
         }
     }
     Ok(())
 }
 
-fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, evt: MouseEvent) {
-    use crossterm::event::MouseEventKind;
+/// Rebuild derived view state without mutating the document.
+fn refresh_view(app: &mut AppState, todo_list: &TodoList) {
+    app.tree_items = build_visible_tree_items(todo_list, &app.mode, &app.filter_lower);
 
-    if matches!(
-        app.mode,
-        Mode::InputTask { .. }
-            | Mode::InputDue { .. }
-            | Mode::InputSection { .. }
-            | Mode::Filter
-    ) {
-        app.pending_d = false;
-        app.pending_g = false;
-        app.pending_y = false;
+    restore_filter_selection(app, todo_list);
+
+    let mode = app.mode.clone();
+    if matches!(&mode, Mode::Filter)
+        && let Some(anchor) = app.filter_anchor.clone()
+        && select_path(app, &anchor)
+    {
+        clamp_right_selection_for_node(app, todo_list);
         return;
     }
 
-    let MouseEvent { kind, column, row, .. } = evt;
-
-    if app.mode == Mode::Help {
-        if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
-            let delta = if matches!(kind, MouseEventKind::ScrollUp) { -1i16 } else { 1i16 };
-            handle_mouse_scroll(app, todo_list, delta);
-            return;
+    match mode {
+        Mode::InputSection(input) if input.node.is_none() => {
+            select_ghost(app);
         }
-        if matches!(kind, MouseEventKind::Down(MouseButton::Left)) {
-            let popup_width = area.width * HELP_POPUP_WIDTH_PERCENT / 100;
-            let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
-            let y = area.y + (area.height.saturating_sub(HELP_POPUP_HEIGHT)) / 2;
-            let inside = column >= x
-                && column < x + popup_width.min(area.width)
-                && row >= y
-                && row < y + HELP_POPUP_HEIGHT.min(area.height);
-            if !inside {
-                app.mode = Mode::Normal;
+        Mode::InputSection(input) => {
+            if let Some(node) = &input.node {
+                select_path(app, node);
             }
         }
+        Mode::InputTask(input) => {
+            select_path(app, &input.node);
+            let refs = get_task_refs_filtered(todo_list, &input.node, &app.filter_lower);
+            let row = match input.editing_idx {
+                Some(index) => index,
+                None => input.insert_idx.unwrap_or(refs.len()),
+            };
+            if input.editing_idx.is_some() {
+                if refs.is_empty() {
+                    app.right_state.select(None);
+                } else {
+                    app.right_state.select(Some(row.min(refs.len() - 1)));
+                }
+            } else {
+                // The row list includes the ghost row at the insertion point.
+                app.right_state.select(Some(row.min(refs.len())));
+            }
+        }
+        _ => {
+            if app.filter_anchor.is_some() {
+                app.filter_anchor = None;
+            }
+            clamp_left_selection(app);
+            clamp_right_selection_for_node(app, todo_list);
+        }
+    }
+}
+
+fn restore_filter_selection(app: &mut AppState, todo_list: &TodoList) {
+    let Some(snapshot) = app.filter_restore.take() else {
+        return;
+    };
+
+    if let Some(node) = &snapshot.node {
+        select_path(app, node);
+    }
+
+    if let Some(task) = snapshot.task {
+        let refs = get_task_refs_filtered(todo_list, &task.node, &app.filter_lower);
+        if let Some(position) = find_task_position(&refs, &task) {
+            app.right_state.select(Some(position));
+        } else {
+            app.right_state.select(None);
+        }
+    }
+}
+
+fn find_task_position(refs: &[TaskRef], task: &TaskRef) -> Option<usize> {
+    refs.iter()
+        .position(|reference| reference.node == task.node && reference.task_idx == task.task_idx)
+}
+
+fn clamp_right_selection_for_node(app: &mut AppState, todo_list: &TodoList) {
+    let row_count = selected_node(app).map_or(0, |node| {
+        get_task_refs_filtered(todo_list, &node, &app.filter_lower).len()
+    });
+    clamp_right_selection(app, row_count);
+}
+
+fn select_path(app: &mut AppState, path: &[usize]) -> bool {
+    if let Some(position) = app
+        .tree_items
+        .iter()
+        .position(|item| matches!(item, TreeItem::Node(p) if p.as_slice() == path))
+    {
+        app.left_state.select(Some(position));
+        true
+    } else {
+        false
+    }
+}
+
+fn select_ghost(app: &mut AppState) {
+    if let Some(position) = app
+        .tree_items
+        .iter()
+        .position(|item| matches!(item, TreeItem::Ghost(_)))
+    {
+        app.left_state.select(Some(position));
+    } else {
+        clamp_left_selection(app);
+    }
+}
+
+fn handle_mouse(app: &mut AppState, todo_list: &TodoList, area: Rect, event: MouseEvent) {
+    let MouseEvent {
+        kind, column, row, ..
+    } = event;
+
+    if matches!(app.mode, Mode::Help) {
+        handle_help_mouse(app, area, kind, column, row);
+        return;
+    }
+    if app.mode.is_text_input() {
+        app.clear_pending();
         return;
     }
 
     match kind {
-        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            let delta = if matches!(kind, MouseEventKind::ScrollUp) { -1i16 } else { 1i16 };
-            handle_mouse_scroll(app, todo_list, delta);
+        MouseEventKind::ScrollUp => scroll(app, todo_list, -1),
+        MouseEventKind::ScrollDown => scroll(app, todo_list, 1),
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_click(app, todo_list, area, column, row);
+        }
+        _ => {}
+    }
+}
+
+fn handle_help_mouse(app: &mut AppState, area: Rect, kind: MouseEventKind, column: u16, row: u16) {
+    match kind {
+        MouseEventKind::ScrollUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+        }
+        MouseEventKind::ScrollDown => {
+            app.help_scroll = app.help_scroll.saturating_add(1);
         }
         MouseEventKind::Down(MouseButton::Left) => {
-            // Ignore clicks on the top border row (index 0, no items) and the
-            // bottom status-bar row. `row.checked_sub(1)` also guards the
-            // degenerate `area.height == 0` case.
-            let Some(idx) = row.checked_sub(1).map(|r| r as usize) else {
-                return;
-            };
-            if idx + 2 >= area.height as usize {
-                return;
-            }
-
-            let left_width = area.width * LEFT_PANEL_PERCENT / 100;
-
-            if column < left_width {
-                app.focus = Focus::Left;
-                if idx < app.tree_items.len() {
-                    app.left_state.select(Some(idx));
-                }
-            } else {
-                app.focus = Focus::Right;
-                if let Some(node) = selected_node(app) {
-                    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                    if idx < refs.len() {
-                        app.right_state.select(Some(idx));
-                        return;
-                    }
-                }
-                if !app.tree_items.is_empty() {
-                    app.left_state.select(Some(
-                        app.left_state.selected().unwrap_or(0).min(app.tree_items.len() - 1)
-                    ));
-                }
+            let popup = help_popup(area);
+            let inside = column >= popup.x
+                && column < popup.x.saturating_add(popup.width)
+                && row >= popup.y
+                && row < popup.y.saturating_add(popup.height);
+            if !inside {
+                app.mode = Mode::Normal;
             }
         }
         _ => {}
     }
 }
 
-fn handle_mouse_scroll(app: &mut AppState, todo_list: &TodoList, delta: i16) {
-    if app.mode == Mode::Help {
-        app.help_scroll = app.help_scroll.saturating_add_signed(delta);
+fn help_popup(area: Rect) -> Rect {
+    let width = percentage(area.width, HELP_POPUP_WIDTH_PERCENT);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(HELP_POPUP_HEIGHT)) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: HELP_POPUP_HEIGHT.min(area.height),
+    }
+}
+
+fn handle_click(app: &mut AppState, todo_list: &TodoList, area: Rect, column: u16, row: u16) {
+    let Some(row_index) = row.checked_sub(1).map(usize::from) else {
+        return;
+    };
+    if row_index + 2 >= area.height as usize {
         return;
     }
+
+    let left_width = percentage(area.width, LEFT_PANEL_PERCENT);
+    if column < left_width {
+        app.focus = Focus::Left;
+        if row_index < app.tree_items.len() {
+            app.left_state.select(Some(row_index));
+        }
+        return;
+    }
+
+    app.focus = Focus::Right;
+    if let Some(node) = selected_node(app) {
+        let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+        if row_index < refs.len() {
+            app.right_state.select(Some(row_index));
+            return;
+        }
+    }
+    clamp_right_selection_for_node(app, todo_list);
+}
+
+fn scroll(app: &mut AppState, todo_list: &TodoList, delta: isize) {
     match app.focus {
         Focus::Left => {
-            let max = app.tree_items.len().saturating_sub(1);
-            let cur = app.left_state.selected().unwrap_or(0) as i16;
-            app.left_state.select(Some(
-                cur.saturating_add(delta).min(max as i16).max(0) as usize
-            ));
+            if app.tree_items.is_empty() {
+                app.left_state.select(None);
+                return;
+            }
+            let current = app.left_state.selected().unwrap_or(0) as isize;
+            let max = app.tree_items.len().saturating_sub(1) as isize;
+            app.left_state
+                .select(Some(current.saturating_add(delta).clamp(0, max) as usize));
         }
         Focus::Right => {
-            if let Some(node) = selected_node(app) {
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                let max = refs.len().saturating_sub(1);
-                let cur = app.right_state.selected().unwrap_or(0) as i16;
-                app.right_state.select(Some(
-                    cur.saturating_add(delta).min(max as i16).max(0) as usize
-                ));
+            let Some(node) = selected_node(app) else {
+                app.right_state.select(None);
+                return;
+            };
+            let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+            if refs.is_empty() {
+                app.right_state.select(None);
+                return;
             }
+            let current = app.right_state.selected().unwrap_or(0) as isize;
+            let max = refs.len().saturating_sub(1) as isize;
+            app.right_state
+                .select(Some(current.saturating_add(delta).clamp(0, max) as usize));
         }
     }
 }
 
-fn sync_selection_states(app: &mut AppState, todo_list: &TodoList) {
-    match &app.mode {
-        Mode::InputSection { node: None, .. } => {
-            if let Some(pos) = app
-                .tree_items
-                .iter()
-                .position(|i| matches!(i, TreeItem::Ghost(_)))
-            {
-                app.left_state.select(Some(pos));
-            }
-        }
-        Mode::InputTask {
-            editing_idx: None,
-            insert_idx,
-            ..
-        } => {
-            if let Some(node) = selected_node(app) {
-                let task_refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                let pos = insert_idx.unwrap_or(task_refs.len()).min(task_refs.len());
-                app.right_state.select(Some(pos));
-            }
-        }
-        _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::task::{Section, Task, TodoList};
-    use crate::tui::state::{AppState, Mode, TreeItem};
-
-    fn sample_todo_list() -> TodoList {
-        TodoList {
-            sections: vec![
-                Section {
-                    name: "work".to_string(),
-                    tasks: vec![
-                        Task {
-                            text: "Task A".to_string(),
-                            is_done: false,
-                            due: None,
-                        },
-                        Task {
-                            text: "Task B".to_string(),
-                            is_done: true,
-                            due: None,
-                        },
-                    ],
-                    children: vec![Section {
-                        name: "backend".to_string(),
-                        tasks: vec![Task {
-                            text: "Fix API".to_string(),
-                            is_done: false,
-                            due: None,
-                        }],
-                        children: vec![Section {
-                            name: "api".to_string(),
-                            tasks: vec![Task {
-                                text: "Fix endpoint".to_string(),
-                                is_done: false,
-                                due: None,
-                            }],
-                            children: vec![],
-                        }],
-                    }],
-                },
-                Section {
-                    name: "personal".to_string(),
-                    tasks: vec![Task {
-                        text: "Buy milk".to_string(),
-                        is_done: false,
-                        due: None,
-                    }],
-                    children: vec![],
-                },
-            ],
-        }
-    }
-
-    #[test]
-    fn build_tree_items_in_normal_mode() {
-        let list = sample_todo_list();
-        let items = build_tree_items(&list, &Mode::Normal);
-        assert_eq!(items.len(), 4);
-        assert_eq!(items[0], TreeItem::Node(vec![0]));
-        assert_eq!(items[1], TreeItem::Node(vec![0, 0]));
-        assert_eq!(items[2], TreeItem::Node(vec![0, 0, 0]));
-        assert_eq!(items[3], TreeItem::Node(vec![1]));
-    }
-
-    #[test]
-    fn build_tree_items_empty_list() {
-        let list = TodoList::default();
-        let items = build_tree_items(&list, &Mode::Normal);
-        assert!(items.is_empty());
-    }
-
-    #[test]
-    fn selected_node_returns_none_when_nothing_selected() {
-        let mut app = AppState::new(0);
-        app.tree_items = vec![TreeItem::Node(vec![0])];
-        assert!(selected_node(&app).is_none());
-    }
-
-    #[test]
-    fn selected_node_returns_correct_node() {
-        let mut app = AppState::new(2);
-        app.tree_items = vec![
-            TreeItem::Node(vec![0]),
-            TreeItem::Node(vec![0, 0]),
-            TreeItem::Node(vec![1]),
-        ];
-        app.left_state.select(Some(1));
-        assert_eq!(selected_node(&app), Some(vec![0, 0]));
-    }
-
-    #[test]
-    fn selected_node_returns_none_on_ghost() {
-        let mut app = AppState::new(0);
-        app.tree_items = vec![TreeItem::Ghost(0)];
-        app.left_state.select(Some(0));
-        assert!(selected_node(&app).is_none());
-    }
-
-    #[test]
-    fn node_name_for_section() {
-        let list = sample_todo_list();
-        assert_eq!(node_name(&list, &vec![0]), "work");
-        assert_eq!(node_name(&list, &vec![1]), "personal");
-        assert_eq!(node_name(&list, &vec![0, 0]), "backend");
-    }
-
-    #[test]
-    fn build_visible_tree_items_empty_filter_keeps_all() {
-        let list = sample_todo_list();
-        let items = build_visible_tree_items(&list, &Mode::Normal, "");
-        assert_eq!(items.len(), 4);
-    }
-
-    #[test]
-    fn build_visible_tree_items_filters_sections_case_insensitive() {
-        let list = sample_todo_list();
-        // Filter is pre-lowercased by AppState, so pass lowercase here
-        let items = build_visible_tree_items(&list, &Mode::Normal, "personal");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0], TreeItem::Node(vec![1]));
-    }
-
-    #[test]
-    fn build_visible_tree_items_includes_matching_parent_of_nested_task() {
-        let list = sample_todo_list();
-        // "endpoint" only appears in the nested "api" task; its ancestors must stay visible.
-        let items = build_visible_tree_items(&list, &Mode::Normal, "endpoint");
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0], TreeItem::Node(vec![0]));
-        assert_eq!(items[1], TreeItem::Node(vec![0, 0]));
-        assert_eq!(items[2], TreeItem::Node(vec![0, 0, 0]));
-    }
-
-    #[test]
-    fn get_task_refs_filtered_narrows_by_text() {
-        let list = sample_todo_list();
-        let refs = get_task_refs_filtered(&list, &vec![0], "backend");
-        // Matches the "backend" subsection task directly and the nested "api" task via its
-        // breadcrumb (sub_name "backend › api").
-        assert_eq!(refs.len(), 2);
-        assert_eq!(refs[0].node, vec![0, 0]);
-        assert_eq!(refs[0].task_idx, 0);
-        assert_eq!(refs[1].node, vec![0, 0, 0]);
-        assert_eq!(refs[1].task_idx, 0);
-    }
-
-    #[test]
-    fn get_task_refs_filtered_empty_filter_returns_all() {
-        let list = sample_todo_list();
-        let refs = get_task_refs_filtered(&list, &vec![0], "");
-        assert_eq!(refs.len(), 4);
-    }
-
-    #[test]
-    fn get_task_refs_filtered_shows_all_tasks_when_top_level_section_matches() {
-        let list = sample_todo_list();
-        let refs = get_task_refs_filtered(&list, &vec![0], "work");
-        assert_eq!(refs.len(), 4);
-    }
-
-    #[test]
-    fn get_task_refs_filtered_shows_direct_tasks_when_nested_section_matches() {
-        let list = sample_todo_list();
-        let refs = get_task_refs_filtered(&list, &vec![0, 0], "backend");
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].node, vec![0, 0]);
-        assert_eq!(refs[0].task_idx, 0);
-    }
-
-    #[test]
-    fn get_task_refs_filtered_still_filters_when_section_does_not_match() {
-        let list = sample_todo_list();
-        let refs = get_task_refs_filtered(&list, &vec![0], "milk");
-        assert!(refs.is_empty());
-    }
-
-    #[test]
-    fn count_tasks_includes_all_descendants() {
-        let list = sample_todo_list();
-        assert_eq!(list.sections[0].count_tasks(), 4);
-    }
-
-    #[test]
-    fn count_tasks_section_only() {
-        let list = sample_todo_list();
-        assert_eq!(list.sections[1].count_tasks(), 1);
-    }
-
-    #[test]
-    fn count_tasks_empty_section() {
-        let sec = Section {
-            name: "empty".to_string(),
-            tasks: Vec::new(),
-            children: Vec::new(),
-        };
-        assert_eq!(sec.count_tasks(), 0);
-    }
-
-    #[test]
-    fn task_refs_for_top_level_flattens_subtree() {
-        let list = sample_todo_list();
-        let refs = get_task_refs(&list, &vec![0]);
-        assert_eq!(refs.len(), 4);
-        assert_eq!(refs[0].node, vec![0]);
-        assert_eq!(refs[0].task_idx, 0);
-        assert_eq!(refs[0].sub_name, None);
-        assert_eq!(refs[1].node, vec![0]);
-        assert_eq!(refs[1].task_idx, 1);
-        assert_eq!(refs[1].sub_name, None);
-        assert_eq!(refs[2].node, vec![0, 0]);
-        assert_eq!(refs[2].task_idx, 0);
-        assert_eq!(refs[2].sub_name.as_deref(), Some("backend"));
-        assert_eq!(refs[3].node, vec![0, 0, 0]);
-        assert_eq!(refs[3].task_idx, 0);
-        assert_eq!(refs[3].sub_name.as_deref(), Some("backend › api"));
-    }
-
-    #[test]
-    fn task_refs_for_nested_node_lists_direct_only() {
-        let list = sample_todo_list();
-        let refs = get_task_refs(&list, &vec![0, 0]);
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].node, vec![0, 0]);
-        assert_eq!(refs[0].task_idx, 0);
-        assert_eq!(refs[0].sub_name, None);
-    }
-
-    #[test]
-    fn task_refs_for_out_of_bounds_section() {
-        let list = sample_todo_list();
-        let refs = get_task_refs(&list, &vec![99]);
-        assert!(refs.is_empty());
-    }
-
-    #[test]
-    fn get_task_from_ref_subsection_task() {
-        let list = sample_todo_list();
-        let r = TaskRef {
-            node: vec![0, 0, 0],
-            task_idx: 0,
-            sub_name: Some("api".to_string()),
-        };
-        let task = get_task_from_ref(&list, &r).unwrap();
-        assert_eq!(task.text, "Fix endpoint");
-    }
-
-    #[test]
-    fn get_task_from_ref_mut_modifies_task() {
-        let mut list = sample_todo_list();
-        let r = TaskRef {
-            node: vec![0],
-            task_idx: 0,
-            sub_name: None,
-        };
-        let task = get_task_from_ref_mut(&mut list, &r).unwrap();
-        task.is_done = true;
-        task.text = "Modified".to_string();
-        assert!(list.sections[0].tasks[0].is_done);
-        assert_eq!(list.sections[0].tasks[0].text, "Modified");
-    }
-
-    #[test]
-    fn get_task_from_ref_mut_nested_subsection() {
-        let mut list = sample_todo_list();
-        let r = TaskRef {
-            node: vec![0, 0, 0],
-            task_idx: 0,
-            sub_name: Some("api".to_string()),
-        };
-        let task = get_task_from_ref_mut(&mut list, &r).unwrap();
-        task.text = "Updated endpoint".to_string();
-        assert_eq!(
-            list.sections[0].children[0].children[0].tasks[0].text,
-            "Updated endpoint"
-        );
-    }
-
-    #[test]
-    fn insert_section_top_level() {
-        let mut list = sample_todo_list();
-        let path = insert_section(&mut list, None, 1, Section::new("inserted")).unwrap();
-        assert_eq!(path, vec![1]);
-        assert_eq!(list.sections.len(), 3);
-        assert_eq!(list.sections[1].name, "inserted");
-    }
-
-    #[test]
-    fn insert_section_nested() {
-        let mut list = sample_todo_list();
-        let path = insert_section(&mut list, Some(&vec![0]), 0, Section::new("child")).unwrap();
-        assert_eq!(path, vec![0, 0]);
-        assert_eq!(list.sections[0].children[0].name, "child");
-        assert_eq!(list.sections[0].children[1].name, "backend");
-    }
-
-    #[test]
-    fn remove_section_nested() {
-        let mut list = sample_todo_list();
-        let removed = remove_section(&mut list, &vec![0, 0]).unwrap();
-        assert_eq!(removed.name, "backend");
-        assert!(list.sections[0].children.is_empty());
-    }
-
-    #[test]
-    fn child_count_helper() {
-        let list = sample_todo_list();
-        assert_eq!(child_count(&list, None), 2);
-        assert_eq!(child_count(&list, Some(&vec![0])), 1);
-        assert_eq!(child_count(&list, Some(&vec![0, 0])), 1);
-    }
-
-    #[test]
-    fn filter_restore_node_reselects_after_tree_rebuild() {
-        let list = sample_todo_list();
-        let mut app = AppState::new(list.sections.len());
-        app.tree_items = build_tree_items(&list, &app.mode);
-        app.filter_restore_node = Some(vec![0, 0]);
-
-        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "backend");
-        if let Some(node) = app.filter_restore_node.take()
-            && let Some(pos) = app
-                .tree_items
-                .iter()
-                .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
-        {
-            app.left_state.select(Some(pos));
-            app.right_state.select(Some(0));
-        }
-
-        assert_eq!(app.left_state.selected(), Some(1));
-        assert_eq!(app.right_state.selected(), Some(0));
-    }
-
-    #[test]
-    fn filter_restore_task_reselects_after_tree_rebuild() {
-        let list = sample_todo_list();
-        let mut app = AppState::new(list.sections.len());
-        app.tree_items = build_tree_items(&list, &app.mode);
-        app.filter_restore_node = Some(vec![0]);
-        app.filter_restore_task_node = Some(vec![0, 0]);
-        app.filter_restore_task_idx = Some(0);
-
-        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "backend");
-        if let Some(node) = app.filter_restore_node.take()
-            && let Some(pos) = app
-                .tree_items
-                .iter()
-                .position(|item| matches!(item, TreeItem::Node(p) if p == &node))
-        {
-            app.left_state.select(Some(pos));
-            if let (Some(task_node), Some(task_idx)) = (
-                app.filter_restore_task_node.take(),
-                app.filter_restore_task_idx.take(),
-            ) {
-                let refs = get_task_refs_filtered(&list, &node, "");
-                if let Some(new_pos) = refs
-                    .iter()
-                    .position(|r| r.node == task_node && r.task_idx == task_idx)
-                {
-                    app.right_state.select(Some(new_pos));
-                } else {
-                    app.right_state.select(Some(0));
-                }
-            } else {
-                app.right_state.select(Some(0));
-            }
-        }
-
-        assert_eq!(app.left_state.selected(), Some(0));
-        assert_eq!(app.right_state.selected(), Some(2));
-    }
+/// Percentage of a `u16` dimension without integer overflow.
+pub fn percentage(total: u16, percent: u16) -> u16 {
+    (u32::from(total) * u32::from(percent) / 100) as u16
 }

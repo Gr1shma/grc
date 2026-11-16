@@ -8,7 +8,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
+/// Draw the help overlay and return the scroll offset clamped to its content.
+pub fn draw_help_overlay(f: &mut Frame, app: &AppState, area: Rect) -> u16 {
     let popup = centered_rect(HELP_POPUP_WIDTH_PERCENT, HELP_POPUP_HEIGHT, area);
     f.render_widget(Clear, popup);
 
@@ -104,6 +105,9 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
         Line::from("    next week  /  nextweek  /  nw     - 7 days from today"),
         Line::from("    sun  /  mon  /  tue  /  wed  /  thu  /  fri  /  sat"),
         Line::from("    sunday / monday / ...             - Next occurrence of weekday"),
+        Line::from("    +3d / -2w / +1m / +1y             - Relative offset"),
+        Line::from("    in 3 days / in 2 weeks            - Relative offset"),
+        Line::from("    jun 15 / june 15                  - Month name + day"),
         Line::from("    Type due:DATE inline in task text (e.g. Buy milk due:tue)"),
         Line::from(""),
         Line::from("  Use Up/Down (j/k) to scroll. Press Esc, q, or ? to close"),
@@ -113,12 +117,11 @@ pub fn draw_help_overlay(f: &mut Frame, app: &mut AppState, area: Rect) {
     let visible_height = popup.height.saturating_sub(2) as usize;
     let max_scroll = content_len.saturating_sub(visible_height);
     let max_scroll_u16 = u16::try_from(max_scroll).unwrap_or(u16::MAX);
-    app.help_scroll = app.help_scroll.min(max_scroll_u16);
+    let scroll = app.help_scroll.min(max_scroll_u16);
 
-    let para = Paragraph::new(content)
-        .block(block)
-        .scroll((app.help_scroll, 0));
+    let para = Paragraph::new(content).block(block).scroll((scroll, 0));
     f.render_widget(para, popup);
+    scroll
 }
 
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {

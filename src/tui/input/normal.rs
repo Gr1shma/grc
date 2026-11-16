@@ -1,138 +1,174 @@
+//! Normal-mode key handling.
+//!
+//! Navigation, two-key commands, filtering, and document mutations live here.
+//! Every mutation writes the document immediately; there is no unsaved state.
+
 use crate::parser::write_file;
-use crate::task::TodoList;
-use crate::tui::state::{AppState, ClipboardItem, Focus, Mode};
-use crate::tui::{
-    build_tree_items, child_count, get_task_from_ref, get_task_from_ref_mut,
-    get_task_refs_filtered, insert_section, node_name, node_task_count, rebuild_and_select,
-    remove_section, selected_node,
+use crate::task::{
+    NodePath, Section, TodoList, child_count, get_node, get_node_mut, insert_section,
+    remove_section, task_count,
+};
+use crate::tui::state::{
+    AppState, ClipboardItem, Focus, Mode, PendingKey, SectionInput, SelectionSnapshot, TaskInput,
+    TextField,
+};
+use crate::tui::task_ref::{
+    TaskRef, get_task_from_ref, get_task_from_ref_mut, get_task_refs_filtered,
+};
+use crate::tui::tree::{
+    build_visible_tree_items, clamp_left_selection, clamp_right_selection, node_level, node_name,
+    selected_node,
 };
 use anyhow::Result;
 use crossterm::event::KeyCode;
 use std::path::Path;
 
+/// Handle a key in normal navigation mode.
+///
+/// Returns `true` when the application should quit.
 pub fn handle_normal(
     app: &mut AppState,
     todo_list: &mut TodoList,
     path: &Path,
     code: KeyCode,
 ) -> Result<bool> {
-    if code == KeyCode::Char('?') {
-        app.mode = Mode::Help;
+    if handle_pending(app, todo_list, path, code)? {
         return Ok(false);
     }
 
-    if code == KeyCode::Char(':') && app.focus == Focus::Right {
-        sort_tasks_by_due(app, todo_list, path)?;
-        return Ok(false);
-    }
-
-    if code == KeyCode::Char('/') {
-        app.mode = Mode::Filter;
-        return Ok(false);
-    }
-
-    if code == KeyCode::Esc && !app.filter.is_empty() {
-        app.filter_restore_node = selected_node(app);
-        if app.focus == Focus::Right
-            && let Some(node) = selected_node(app)
-        {
-            let cur = app.right_state.selected().unwrap_or(0);
-            let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-            if let Some(ref_item) = refs.get(cur) {
-                app.filter_restore_task_node = Some(ref_item.node.clone());
-                app.filter_restore_task_idx = Some(ref_item.task_idx);
-            }
-        }
-        app.filter.clear();
-        app.filter_lower.clear();
-        return Ok(false);
-    }
-
-    if app.pending_d {
-        app.pending_d = false;
-        if code == KeyCode::Char('d') {
-            match app.focus {
-                Focus::Left => delete_tree_node(app, todo_list, path)?,
-                Focus::Right => delete_task(app, todo_list, path)?,
-            }
+    match code {
+        KeyCode::Char('?') => {
+            app.mode = Mode::Help;
             return Ok(false);
         }
-        // Mismatched key: cancel pending operation, discard the key
-        return Ok(false);
-    }
-
-    if app.pending_g {
-        app.pending_g = false;
-        if code == KeyCode::Char('g') {
-            match app.focus {
-                Focus::Left => {
-                    app.left_state.select(Some(0));
-                    app.right_state.select(Some(0));
-                }
-                Focus::Right => {
-                    app.right_state.select(Some(0));
-                }
-            }
+        KeyCode::Char(':') if app.focus == Focus::Right => {
+            sort_tasks_by_due(app, todo_list, path)?;
             return Ok(false);
         }
-        // Mismatched key: cancel pending operation, discard the key
-        return Ok(false);
-    }
-
-    if app.pending_y {
-        app.pending_y = false;
-        if code == KeyCode::Char('y') {
-            match app.focus {
-                Focus::Left => yank_tree_node(app, todo_list),
-                Focus::Right => yank_task(app, todo_list),
-            }
+        KeyCode::Char('/') => {
+            app.filter_anchor = selected_node(app);
+            app.mode = Mode::Filter;
             return Ok(false);
         }
-        // Mismatched key: cancel pending operation, discard the key
-        return Ok(false);
+        KeyCode::Esc if !app.filter.is_empty() => {
+            remember_selection(app, todo_list);
+            clear_filter(app);
+            return Ok(false);
+        }
+        _ => {}
     }
 
     match app.focus {
-        Focus::Left => handle_normal_left(app, todo_list, path, code),
-        Focus::Right => handle_normal_right(app, todo_list, path, code),
+        Focus::Left => handle_left(app, todo_list, path, code),
+        Focus::Right => handle_right(app, todo_list, path, code),
     }
 }
 
+/// Handle the second key of `dd`, `gg`, or `yy`.
+///
+/// The prefix is consumed by every key: an unrelated key cancels the command
+/// and is not also executed, matching the previous behaviour.
+fn handle_pending(
+    app: &mut AppState,
+    todo_list: &mut TodoList,
+    path: &Path,
+    code: KeyCode,
+) -> Result<bool> {
+    let pending = std::mem::replace(&mut app.pending, PendingKey::None);
+    match pending {
+        PendingKey::None => Ok(false),
+        PendingKey::Delete => {
+            if code == KeyCode::Char('d') {
+                match app.focus {
+                    Focus::Left => delete_section(app, todo_list, path)?,
+                    Focus::Right => delete_task(app, todo_list, path)?,
+                }
+            }
+            Ok(true)
+        }
+        PendingKey::Goto => {
+            if code == KeyCode::Char('g') {
+                jump_to_top(app, todo_list);
+            }
+            Ok(true)
+        }
+        PendingKey::Yank => {
+            if code == KeyCode::Char('y') {
+                match app.focus {
+                    Focus::Left => yank_section(app, todo_list),
+                    Focus::Right => yank_task(app, todo_list),
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+fn jump_to_top(app: &mut AppState, todo_list: &TodoList) {
+    match app.focus {
+        Focus::Left => {
+            if app.tree_items.is_empty() {
+                app.left_state.select(None);
+            } else {
+                app.left_state.select(Some(0));
+            }
+            app.right_state.select(Some(0));
+        }
+        Focus::Right => {
+            if let Some(node) = selected_node(app) {
+                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+                app.right_state.select((!refs.is_empty()).then_some(0));
+            }
+        }
+    }
+}
+
+/// Handle typing in the live-filter mode.
 pub fn handle_filter(app: &mut AppState, todo_list: &TodoList, code: KeyCode) -> Result<()> {
     match code {
         KeyCode::Esc => {
-            app.filter_restore_node = selected_node(app);
-            if app.focus == Focus::Right
-                && let Some(node) = selected_node(app)
-            {
-                let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                if let Some(ref_item) = refs.get(cur) {
-                    app.filter_restore_task_node = Some(ref_item.node.clone());
-                    app.filter_restore_task_idx = Some(ref_item.task_idx);
-                }
-            }
-            app.filter.clear();
-            app.filter_lower.clear();
+            remember_selection(app, todo_list);
+            clear_filter(app);
             app.mode = Mode::Normal;
         }
         KeyCode::Enter => {
+            app.filter_anchor = None;
             app.mode = Mode::Normal;
         }
         KeyCode::Backspace => {
-            app.filter.pop();
-            app.filter_lower = app.filter.to_lowercase();
+            let mut filter = app.filter.clone();
+            filter.pop();
+            app.set_filter(filter);
         }
-        KeyCode::Char(c) => {
-            app.filter.push(c);
-            app.filter_lower = app.filter.to_lowercase();
+        KeyCode::Char(character) => {
+            let mut filter = app.filter.clone();
+            filter.push(character);
+            app.set_filter(filter);
         }
         _ => {}
     }
     Ok(())
 }
 
-fn handle_normal_left(
+fn remember_selection(app: &mut AppState, todo_list: &TodoList) {
+    let node = selected_node(app);
+    let task = if app.focus == Focus::Right {
+        node.as_ref().and_then(|node| {
+            let refs = get_task_refs_filtered(todo_list, node, &app.filter_lower);
+            refs.get(app.right_state.selected().unwrap_or(0)).cloned()
+        })
+    } else {
+        None
+    };
+    app.filter_restore = Some(SelectionSnapshot { node, task });
+    app.filter_anchor = None;
+}
+
+fn clear_filter(app: &mut AppState) {
+    app.clear_filter();
+}
+
+fn handle_left(
     app: &mut AppState,
     todo_list: &mut TodoList,
     path: &Path,
@@ -140,126 +176,120 @@ fn handle_normal_left(
 ) -> Result<bool> {
     match code {
         KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('j') | KeyCode::Down => {
-            let max = app.tree_items.len().saturating_sub(1);
-            let cur = app.left_state.selected().unwrap_or(0);
-            app.left_state.select(Some((cur + 1).min(max)));
-            app.right_state.select(Some(0));
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            let cur = app.left_state.selected().unwrap_or(0);
-            app.left_state.select(Some(cur.saturating_sub(1)));
-            app.right_state.select(Some(0));
-        }
+        KeyCode::Char('j') | KeyCode::Down => move_left_down(app),
+        KeyCode::Char('k') | KeyCode::Up => move_left_up(app),
         KeyCode::Char('l') | KeyCode::Tab | KeyCode::Enter => {
             if selected_node(app).is_some() {
                 app.focus = Focus::Right;
             }
         }
         KeyCode::Char('a' | 'A' | 'o' | 'O') => {
-            handle_normal_left_add_section(app, code);
+            app.mode = Mode::InputSection(new_section_input(todo_list, app, code));
         }
         KeyCode::Char('i') => {
             if let Some(node) = selected_node(app) {
                 let name = node_name(todo_list, &node);
-                let cursor = name.chars().count();
-                app.mode = Mode::InputSection {
+                let level = node_level(todo_list, &node);
+                app.mode = Mode::InputSection(SectionInput {
                     node: Some(node),
                     parent: None,
                     insert_idx: None,
-                    buf: name,
-                    cursor,
-                };
+                    level,
+                    field: TextField::new(name),
+                });
             }
         }
-        KeyCode::Char('d') => {
-            app.pending_d = true;
-        }
-        KeyCode::Char('g') => {
-            app.pending_g = true;
-        }
-        KeyCode::Char('y') => {
-            app.pending_y = true;
-        }
-        KeyCode::Char('p') => {
-            paste_clipboard(app, todo_list, path, false)?;
-        }
-        KeyCode::Char('P') => {
-            paste_clipboard(app, todo_list, path, true)?;
-        }
-        KeyCode::Char('G') => {
-            let max = app.tree_items.len().saturating_sub(1);
-            app.left_state.select(Some(max));
-            app.right_state.select(Some(0));
-        }
+        KeyCode::Char('d') => app.pending = PendingKey::Delete,
+        KeyCode::Char('g') => app.pending = PendingKey::Goto,
+        KeyCode::Char('y') => app.pending = PendingKey::Yank,
+        KeyCode::Char('p') => paste_clipboard(app, todo_list, path, false)?,
+        KeyCode::Char('P') => paste_clipboard(app, todo_list, path, true)?,
+        KeyCode::Char('G') => move_left_bottom(app),
         _ => {}
     }
     Ok(false)
 }
 
-fn handle_normal_left_add_section(app: &mut AppState, code: KeyCode) {
-    match code {
-        KeyCode::Char('a') => {
-            let parent_opt = selected_node(app);
-            app.mode = Mode::InputSection {
-                node: None,
-                parent: parent_opt,
-                insert_idx: Some(0),
-                buf: String::new(),
-                cursor: 0,
-            };
-        }
+fn move_left_down(app: &mut AppState) {
+    if app.tree_items.is_empty() {
+        app.left_state.select(None);
+        return;
+    }
+    let current = app.left_state.selected().unwrap_or(0);
+    app.left_state
+        .select(Some((current + 1).min(app.tree_items.len() - 1)));
+    app.right_state.select(Some(0));
+}
+
+fn move_left_up(app: &mut AppState) {
+    if app.tree_items.is_empty() {
+        app.left_state.select(None);
+        return;
+    }
+    let current = app.left_state.selected().unwrap_or(0);
+    app.left_state.select(Some(current.saturating_sub(1)));
+    app.right_state.select(Some(0));
+}
+
+fn move_left_bottom(app: &mut AppState) {
+    if app.tree_items.is_empty() {
+        app.left_state.select(None);
+    } else {
+        app.left_state.select(Some(app.tree_items.len() - 1));
+    }
+    app.right_state.select(Some(0));
+}
+
+fn new_section_input(todo_list: &TodoList, app: &AppState, code: KeyCode) -> SectionInput {
+    let field = TextField::default();
+    let Some(node) = selected_node(app) else {
+        return SectionInput {
+            node: None,
+            parent: None,
+            insert_idx: (code == KeyCode::Char('a')).then_some(0),
+            level: 1,
+            field,
+        };
+    };
+
+    let depth = node.len();
+    let level = node_level(todo_list, &node);
+
+    let (parent, insert_idx, target_level) = match code {
+        KeyCode::Char('a') => (Some(node), Some(0), level + 1),
+        KeyCode::Char('A') if depth == 1 => (None, Some(node[0]), 1),
         KeyCode::Char('A') => {
-            let path_sel = selected_node(app).unwrap_or_default();
-            let len = path_sel.len();
-            let (grandparent, insert_idx) = if len == 0 {
-                (None, None)
-            } else if len == 1 {
-                (None, Some(path_sel[0]))
+            let parent = node[..depth - 2].to_vec();
+            let parent_level = if parent.is_empty() {
+                0
             } else {
-                let gp = path_sel[..len - 2].to_vec();
-                let gp_opt = if gp.is_empty() { None } else { Some(gp) };
-                (gp_opt, Some(path_sel[len - 2]))
+                node_level(todo_list, &parent)
             };
-            app.mode = Mode::InputSection {
-                node: None,
-                parent: grandparent,
-                insert_idx,
-                buf: String::new(),
-                cursor: 0,
-            };
+            let insert_idx = node[depth - 2];
+            let parent = (!parent.is_empty()).then_some(parent);
+            (parent, Some(insert_idx), parent_level + 1)
         }
         KeyCode::Char('o') => {
-            let path_sel = selected_node(app).unwrap_or_default();
-            let len = path_sel.len();
-            let parent = (len > 1).then(|| path_sel[..len - 1].to_vec());
-            let insert_idx = (!path_sel.is_empty()).then(|| path_sel[len - 1] + 1);
-            app.mode = Mode::InputSection {
-                node: None,
-                parent,
-                insert_idx,
-                buf: String::new(),
-                cursor: 0,
-            };
+            let parent = (depth > 1).then(|| node[..depth - 1].to_vec());
+            (parent, Some(node[depth - 1] + 1), level)
         }
         KeyCode::Char('O') => {
-            let path_sel = selected_node(app).unwrap_or_default();
-            let len = path_sel.len();
-            let parent = (len > 1).then(|| path_sel[..len - 1].to_vec());
-            let insert_idx = (!path_sel.is_empty()).then_some(path_sel[len - 1]);
-            app.mode = Mode::InputSection {
-                node: None,
-                parent,
-                insert_idx,
-                buf: String::new(),
-                cursor: 0,
-            };
+            let parent = (depth > 1).then(|| node[..depth - 1].to_vec());
+            (parent, Some(node[depth - 1]), level)
         }
-        _ => {}
+        _ => (None, None, 1),
+    };
+
+    SectionInput {
+        node: None,
+        parent,
+        insert_idx,
+        level: target_level,
+        field,
     }
 }
 
-fn handle_normal_right(
+fn handle_right(
     app: &mut AppState,
     todo_list: &mut TodoList,
     path: &Path,
@@ -270,584 +300,326 @@ fn handle_normal_right(
         KeyCode::Char('h') | KeyCode::Esc | KeyCode::Tab => {
             app.focus = Focus::Left;
         }
-        KeyCode::Char('j') | KeyCode::Down => {
-            if let Some(node) = selected_node(app) {
-                let max = get_task_refs_filtered(todo_list, &node, &app.filter_lower).len().saturating_sub(1);
-                let cur = app.right_state.selected().unwrap_or(0);
-                app.right_state.select(Some((cur + 1).min(max)));
-            }
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            let cur = app.right_state.selected().unwrap_or(0);
-            app.right_state.select(Some(cur.saturating_sub(1)));
-        }
-        KeyCode::Char(' ' | 'x') | KeyCode::Enter => {
-            if let Some(node) = selected_node(app) {
-                let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                if let Some(ref_item) = refs.get(cur) {
-                    if let Some(task) = get_task_from_ref_mut(todo_list, ref_item) {
-                        task.is_done = !task.is_done;
-                    }
-                    write_file(path, todo_list)?;
-                }
-            }
-        }
+        KeyCode::Char('j') | KeyCode::Down => move_right_down(app, todo_list),
+        KeyCode::Char('k') | KeyCode::Up => move_right_up(app, todo_list),
+        KeyCode::Char(' ' | 'x') | KeyCode::Enter => toggle_task(app, todo_list, path)?,
         KeyCode::Char('a' | 'o' | 'O' | 'A') => {
-            handle_normal_right_add_task(app, code);
-        }
-        KeyCode::Char('i') => {
             if let Some(node) = selected_node(app) {
-                let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                if let Some(ref_item) = refs.get(cur)
-                    && let Some(task) = get_task_from_ref(todo_list, ref_item)
-                {
-                    let cursor = task.text.chars().count();
-                    app.mode = Mode::InputTask {
-                        editing_idx: Some(cur),
-                        insert_idx: None,
-                        above: false,
-                        buf: task.text.clone(),
-                        cursor,
-                    };
-                }
+                app.mode = Mode::InputTask(new_task_input(app, node, code));
             }
         }
-        KeyCode::Char('t') => {
-            if let Some(node) = selected_node(app) {
-                let cur = app.right_state.selected().unwrap_or(0);
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                if let Some(ref_item) = refs.get(cur)
-                    && let Some(task) = get_task_from_ref(todo_list, ref_item)
-                {
-                    let existing = task
-                        .due
-                        .map(|d| d.format("%Y-%m-%d").to_string())
-                        .unwrap_or_default();
-                    let cursor = existing.chars().count();
-                    app.mode = Mode::InputDue {
-                        task_idx: cur,
-                        buf: existing,
-                        cursor,
-                    };
-                }
-            }
-        }
-        KeyCode::Char('d') => {
-            app.pending_d = true;
-        }
-        KeyCode::Char('g') => {
-            app.pending_g = true;
-        }
-        KeyCode::Char('y') => {
-            app.pending_y = true;
-        }
-        KeyCode::Char('p') => {
-            paste_clipboard(app, todo_list, path, false)?;
-        }
-        KeyCode::Char('P') => {
-            paste_clipboard(app, todo_list, path, true)?;
-        }
-        KeyCode::Char('G') => {
-            if let Some(node) = selected_node(app) {
-                let max = get_task_refs_filtered(todo_list, &node, &app.filter_lower).len().saturating_sub(1);
-                app.right_state.select(Some(max));
-            }
-        }
+        KeyCode::Char('i') => edit_task(app, todo_list),
+        KeyCode::Char('t') => edit_due(app, todo_list),
+        KeyCode::Char('d') => app.pending = PendingKey::Delete,
+        KeyCode::Char('g') => app.pending = PendingKey::Goto,
+        KeyCode::Char('y') => app.pending = PendingKey::Yank,
+        KeyCode::Char('p') => paste_clipboard(app, todo_list, path, false)?,
+        KeyCode::Char('P') => paste_clipboard(app, todo_list, path, true)?,
+        KeyCode::Char('G') => move_right_bottom(app, todo_list),
         _ => {}
     }
     Ok(false)
 }
 
-fn handle_normal_right_add_task(app: &mut AppState, code: KeyCode) {
-    match code {
-        KeyCode::Char('a' | 'o') => {
-            let cur = app.right_state.selected().unwrap_or(0);
-            app.mode = Mode::InputTask {
-                editing_idx: None,
-                insert_idx: Some(cur + 1),
-                above: false,
-                buf: String::new(),
-                cursor: 0,
-            };
-        }
-        KeyCode::Char('O') => {
-            let cur = app.right_state.selected().unwrap_or(0);
-            app.mode = Mode::InputTask {
-                editing_idx: None,
-                insert_idx: Some(cur),
-                above: true,
-                buf: String::new(),
-                cursor: 0,
-            };
-        }
-        KeyCode::Char('A') => {
-            app.mode = Mode::InputTask {
-                editing_idx: None,
-                insert_idx: None,
-                above: false,
-                buf: String::new(),
-                cursor: 0,
-            };
-        }
-        _ => {}
+fn move_right_down(app: &mut AppState, todo_list: &TodoList) {
+    let Some(node) = selected_node(app) else {
+        app.right_state.select(None);
+        return;
+    };
+    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+    if refs.is_empty() {
+        app.right_state.select(None);
+    } else {
+        let current = app.right_state.selected().unwrap_or(0);
+        app.right_state
+            .select(Some((current + 1).min(refs.len() - 1)));
     }
 }
 
-pub fn delete_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
-    if let Some(node) = selected_node(app) {
-        let cur = app.right_state.selected().unwrap_or(0);
-        let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-        if let Some(ref_item) = refs.get(cur) {
-            let task = match get_task_from_ref(todo_list, ref_item) {
-                Some(t) => t.clone(),
-                None => return Ok(()),
-            };
-            app.clipboard = Some(ClipboardItem::Task(task));
+fn move_right_up(app: &mut AppState, todo_list: &TodoList) {
+    let Some(node) = selected_node(app) else {
+        app.right_state.select(None);
+        return;
+    };
+    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+    if refs.is_empty() {
+        app.right_state.select(None);
+    } else {
+        let current = app.right_state.selected().unwrap_or(0);
+        app.right_state
+            .select(Some(current.saturating_sub(1).min(refs.len() - 1)));
+    }
+}
 
-            let node_clone = ref_item.node.clone();
-            let task_idx = ref_item.task_idx;
-            if let Some(sec) = crate::task::get_node_mut(todo_list, &node_clone) {
-                sec.tasks.remove(task_idx);
-            }
-            write_file(path, todo_list)?;
-            let new_len = get_task_refs_filtered(todo_list, &node, &app.filter_lower).len();
-            if new_len == 0 {
-                app.right_state.select(Some(0));
-                app.focus = Focus::Left;
-            } else {
-                app.right_state.select(Some(cur.min(new_len - 1)));
-            }
-        }
+fn move_right_bottom(app: &mut AppState, todo_list: &TodoList) {
+    let Some(node) = selected_node(app) else {
+        app.right_state.select(None);
+        return;
+    };
+    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+    app.right_state
+        .select((!refs.is_empty()).then_some(refs.len() - 1));
+}
+
+fn toggle_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+    let Some(reference) = current_task_ref(app, todo_list) else {
+        return Ok(());
+    };
+    let Some(task) = get_task_from_ref_mut(todo_list, &reference) else {
+        return Ok(());
+    };
+    task.is_done = !task.is_done;
+    write_file(path, todo_list)
+}
+
+fn new_task_input(app: &AppState, node: NodePath, code: KeyCode) -> TaskInput {
+    let current = app.right_state.selected().unwrap_or(0);
+    let (insert_idx, above) = match code {
+        KeyCode::Char('a' | 'o') => (Some(current + 1), false),
+        KeyCode::Char('O') => (Some(current), true),
+        KeyCode::Char('A') => (None, false),
+        _ => (None, false),
+    };
+    TaskInput {
+        editing_idx: None,
+        insert_idx,
+        above,
+        node,
+        field: TextField::default(),
+    }
+}
+
+fn edit_task(app: &mut AppState, todo_list: &TodoList) {
+    let current = app.right_state.selected().unwrap_or(0);
+    let Some(reference) = current_task_ref(app, todo_list) else {
+        return;
+    };
+    let Some(task) = get_task_from_ref(todo_list, &reference) else {
+        return;
+    };
+    let text = task.text.clone();
+    app.mode = Mode::InputTask(TaskInput {
+        editing_idx: Some(current),
+        insert_idx: None,
+        above: false,
+        node: reference.node,
+        field: TextField::new(text),
+    });
+}
+
+fn edit_due(app: &mut AppState, todo_list: &TodoList) {
+    let Some(reference) = current_task_ref(app, todo_list) else {
+        return;
+    };
+    let Some(task) = get_task_from_ref(todo_list, &reference) else {
+        return;
+    };
+    let existing = task
+        .due
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .unwrap_or_default();
+    app.mode = Mode::InputDue(crate::tui::state::DueInput {
+        target: reference,
+        field: TextField::new(existing),
+    });
+}
+
+fn current_task_ref(app: &AppState, todo_list: &TodoList) -> Option<TaskRef> {
+    let node = selected_node(app)?;
+    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+    refs.get(app.right_state.selected().unwrap_or(0)).cloned()
+}
+
+fn delete_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+    let Some(selected) = selected_node(app) else {
+        return Ok(());
+    };
+    let Some(reference) = current_task_ref(app, todo_list) else {
+        return Ok(());
+    };
+    let Some(task) = get_task_from_ref(todo_list, &reference).cloned() else {
+        return Ok(());
+    };
+    let Some(section) = get_node_mut(todo_list, &reference.node) else {
+        return Ok(());
+    };
+    section.tasks.remove(reference.task_idx);
+    app.clipboard = Some(ClipboardItem::Task(task));
+    write_file(path, todo_list)?;
+
+    let new_refs = get_task_refs_filtered(todo_list, &selected, &app.filter_lower);
+    if new_refs.is_empty() {
+        app.right_state.select(None);
+        app.focus = Focus::Left;
+    } else {
+        let current = app.right_state.selected().unwrap_or(0);
+        app.right_state
+            .select(Some(current.min(new_refs.len() - 1)));
     }
     Ok(())
 }
 
-pub fn delete_tree_node(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
-    if let Some(node) = selected_node(app)
-        && let Some(removed) = remove_section(todo_list, &node)
-    {
-        app.clipboard = Some(ClipboardItem::Section(removed));
-        write_file(path, todo_list)?;
-        let cur = app.left_state.selected().unwrap_or(0);
-        if app.tree_items.len() <= 1 {
-            app.left_state.select(None);
-        } else {
-            app.left_state
-                .select(Some(cur.saturating_sub(1).min(app.tree_items.len() - 1)));
-        }
-        app.right_state.select(Some(0));
+fn delete_section(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+    let Some(node) = selected_node(app) else {
+        return Ok(());
+    };
+    let Some(removed) = remove_section(todo_list, &node) else {
+        return Ok(());
+    };
+    let removed_index = app.left_state.selected().unwrap_or(0);
+    app.clipboard = Some(ClipboardItem::Section(removed));
+    write_file(path, todo_list)?;
+
+    app.tree_items = build_visible_tree_items(todo_list, &Mode::Normal, &app.filter_lower);
+    if app.tree_items.is_empty() {
+        app.left_state.select(None);
+    } else {
+        let index = removed_index
+            .saturating_sub(1)
+            .min(app.tree_items.len() - 1);
+        app.left_state.select(Some(index));
     }
+    app.right_state.select(None);
+    app.filter_anchor = None;
     Ok(())
 }
 
-pub fn yank_task(app: &mut AppState, todo_list: &TodoList) {
-    if let Some(node) = selected_node(app) {
-        let cur = app.right_state.selected().unwrap_or(0);
-        let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-        if let Some(ref_item) = refs.get(cur) {
-            let task = match get_task_from_ref(todo_list, ref_item) {
-                Some(t) => t.clone(),
-                None => return,
-            };
-            app.clipboard = Some(ClipboardItem::Task(task));
-        }
-    }
-}
-
-pub fn yank_tree_node(app: &mut AppState, todo_list: &TodoList) {
-    if let Some(node) = selected_node(app)
-        && let Some(sec) = crate::task::get_node(todo_list, &node)
+fn yank_task(app: &mut AppState, todo_list: &TodoList) {
+    if let Some(reference) = current_task_ref(app, todo_list)
+        && let Some(task) = get_task_from_ref(todo_list, &reference)
     {
-        app.clipboard = Some(ClipboardItem::Section(sec.clone()));
+        app.clipboard = Some(ClipboardItem::Task(task.clone()));
     }
 }
 
+fn yank_section(app: &mut AppState, todo_list: &TodoList) {
+    if let Some(node) = selected_node(app)
+        && let Some(section) = get_node(todo_list, &node)
+    {
+        app.clipboard = Some(ClipboardItem::Section(section.clone()));
+    }
+}
+
+/// Paste the clipboard below (`p`) or above (`P`) the current item.
 pub fn paste_clipboard(
     app: &mut AppState,
     todo_list: &mut TodoList,
     path: &Path,
     above: bool,
 ) -> Result<()> {
-    let clip = match &app.clipboard {
-        Some(item) => item.clone(),
-        None => return Ok(()),
+    let Some(clipboard) = app.clipboard.clone() else {
+        return Ok(());
     };
-
-    match clip {
-        ClipboardItem::Task(task) => {
-            if let Some(node) = selected_node(app) {
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                let cur = app.right_state.selected().unwrap_or(0);
-
-                let (target_node, ins_idx) = if app.focus == Focus::Right {
-                    if refs.is_empty() {
-                        let n = node_task_count(todo_list, &node);
-                        (node, if above { 0 } else { n })
-                    } else if cur < refs.len() {
-                        let r = &refs[cur];
-                        let base = r.task_idx;
-                        (r.node.clone(), if above { base } else { base + 1 })
-                    } else {
-                        let n = node_task_count(todo_list, &node);
-                        (node, n)
-                    }
-                } else {
-                    let n = node_task_count(todo_list, &node);
-                    (node, if above { 0 } else { n })
-                };
-
-                if let Some(sec) = crate::task::get_node_mut(todo_list, &target_node) {
-                    sec.tasks.insert(ins_idx, task);
-                }
-                write_file(path, todo_list)?;
-
-                if app.focus == Focus::Right {
-                    app.tree_items = build_tree_items(todo_list, &app.mode);
-                    if let Some(pos) = refs
-                        .iter()
-                        .position(|r| r.node == target_node && r.task_idx == ins_idx)
-                    {
-                        app.right_state.select(Some(pos));
-                    } else {
-                        app.right_state.select(Some(cur));
-                    }
-                }
-            }
-        }
-        ClipboardItem::Section(sec) => {
-            if let Some(node) = selected_node(app) {
-                let len = node.len();
-                let (parent_opt, idx) = if len == 0 {
-                    (None, if above { 0 } else { todo_list.sections.len() })
-                } else {
-                    let parent = (len > 1).then(|| node[..len - 1].to_vec());
-                    let base = node[len - 1];
-                    let idx = if above {
-                        base
-                    } else {
-                        (base + 1).min(child_count(todo_list, parent.as_ref()))
-                    };
-                    (parent, idx)
-                };
-                if let Ok(new_path) = insert_section(todo_list, parent_opt.as_ref(), idx, sec) {
-                    let _ = write_file(path, todo_list);
-                    app.mode = Mode::Normal;
-                    rebuild_and_select(app, todo_list, &new_path);
-                }
-                app.right_state.select(Some(0));
-            } else {
-                let idx = if above { 0 } else { todo_list.sections.len() };
-                if let Ok(new_path) = insert_section(todo_list, None, idx, sec) {
-                    let _ = write_file(path, todo_list);
-                    rebuild_and_select(app, todo_list, &new_path);
-                }
-            }
-        }
+    match clipboard {
+        ClipboardItem::Task(task) => paste_task(app, todo_list, path, task, above),
+        ClipboardItem::Section(section) => paste_section(app, todo_list, path, section, above),
     }
-    Ok(())
 }
 
-fn sort_tasks_by_due(
+fn paste_task(
     app: &mut AppState,
     todo_list: &mut TodoList,
     path: &Path,
+    task: crate::task::Task,
+    above: bool,
 ) -> Result<()> {
-    if let Some(node) = selected_node(app)
-        && let Some(sec) = crate::task::get_node_mut(todo_list, &node)
-    {
-        sec.tasks.sort_by(|a, b| {
-            match (a.due, b.due) {
-                (Some(da), Some(db)) => da.cmp(&db),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
-        });
-        write_file(path, todo_list)?;
+    let Some(selected) = selected_node(app) else {
+        return Ok(());
+    };
+    let refs = get_task_refs_filtered(todo_list, &selected, &app.filter_lower);
+    let current = app.right_state.selected().unwrap_or(0);
+
+    let (target_node, insert_index) = if app.focus == Focus::Right {
+        refs.get(current).map_or_else(
+            || (selected.clone(), task_count(todo_list, &selected)),
+            |reference| {
+                let base = reference.task_idx;
+                (reference.node.clone(), if above { base } else { base + 1 })
+            },
+        )
+    } else {
+        (
+            selected.clone(),
+            if above {
+                0
+            } else {
+                task_count(todo_list, &selected)
+            },
+        )
+    };
+
+    let Some(section) = get_node_mut(todo_list, &target_node) else {
+        return Ok(());
+    };
+    let insert_index = insert_index.min(section.tasks.len());
+    section.tasks.insert(insert_index, task);
+    write_file(path, todo_list)?;
+
+    app.tree_items = build_visible_tree_items(todo_list, &app.mode, &app.filter_lower);
+    if app.focus == Focus::Right {
+        let new_refs = get_task_refs_filtered(todo_list, &selected, &app.filter_lower);
+        if let Some(position) = new_refs.iter().position(|reference| {
+            reference.node.as_slice() == target_node.as_slice()
+                && reference.task_idx == insert_index
+        }) {
+            app.right_state.select(Some(position));
+        } else {
+            clamp_right_selection(app, new_refs.len());
+        }
     }
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::parser::parse_file;
-    use crate::tui::state::{AppState, Focus, TreeItem};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn setup(content: &str) -> (NamedTempFile, AppState, TodoList) {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f.flush().unwrap();
-        let list = parse_file(f.path()).unwrap();
-        let mut app = AppState::new(list.sections.len());
-        app.tree_items = build_tree_items(&list, &app.mode);
-        (f, app, list)
-    }
-
-    #[test]
-    fn test_yank_and_paste_task() {
-        let (f, mut app, mut list) = setup("# main\n- [ ] Task A\n- [ ] Task B\n");
-        app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-
-        yank_task(&mut app, &list);
-        assert!(matches!(app.clipboard, Some(ClipboardItem::Task(_))));
-        if let Some(ClipboardItem::Task(ref t)) = app.clipboard {
-            assert_eq!(t.text, "Task A");
+fn paste_section(
+    app: &mut AppState,
+    todo_list: &mut TodoList,
+    path: &Path,
+    section: Section,
+    above: bool,
+) -> Result<()> {
+    let (parent, index, level) = match selected_node(app) {
+        Some(node) => {
+            let depth = node.len();
+            let level = node_level(todo_list, &node);
+            let parent = (depth > 1).then(|| node[..depth - 1].to_vec());
+            let index = if above {
+                node[depth - 1]
+            } else {
+                (node[depth - 1] + 1).min(child_count(todo_list, parent.as_ref()))
+            };
+            (parent, index, level)
         }
+        None => (None, if above { 0 } else { todo_list.sections.len() }, 1),
+    };
 
-        paste_clipboard(&mut app, &mut list, f.path(), false).unwrap();
-        let parsed = parse_file(f.path()).unwrap();
-        assert_eq!(parsed.sections[0].tasks.len(), 3);
-        assert_eq!(parsed.sections[0].tasks[0].text, "Task A");
-        assert_eq!(parsed.sections[0].tasks[1].text, "Task A");
-        assert_eq!(parsed.sections[0].tasks[2].text, "Task B");
+    let Some(new_path) = insert_section(todo_list, parent.as_ref(), index, section, level) else {
+        return Ok(());
+    };
+    write_file(path, todo_list)?;
+    app.mode = Mode::Normal;
+    app.tree_items = build_visible_tree_items(todo_list, &Mode::Normal, &app.filter_lower);
+    if let Some(position) = app
+        .tree_items
+        .iter()
+        .position(|item| matches!(item, crate::tui::state::TreeItem::Node(p) if p == &new_path))
+    {
+        app.left_state.select(Some(position));
+    } else {
+        clamp_left_selection(app);
     }
+    app.right_state.select(None);
+    Ok(())
+}
 
-    #[test]
-    fn test_delete_yanks_task() {
-        let (f, mut app, mut list) = setup("# main\n- [ ] Task A\n");
-        app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-
-        delete_task(&mut app, &mut list, f.path()).unwrap();
-
-        let parsed = parse_file(f.path()).unwrap();
-        assert!(parsed.sections[0].tasks.is_empty());
-
-        assert!(matches!(app.clipboard, Some(ClipboardItem::Task(_))));
-        if let Some(ClipboardItem::Task(ref t)) = app.clipboard {
-            assert_eq!(t.text, "Task A");
-        }
-    }
-
-    #[test]
-    fn test_yank_and_paste_section() {
-        let (f, mut app, mut list) = setup("# main\n# clz\n");
-        app.focus = Focus::Left;
-        app.left_state.select(Some(0));
-
-        yank_tree_node(&mut app, &list);
-        assert!(matches!(app.clipboard, Some(ClipboardItem::Section(_))));
-
-        app.left_state.select(Some(1));
-        app.tree_items = build_tree_items(&list, &app.mode);
-        paste_clipboard(&mut app, &mut list, f.path(), false).unwrap();
-
-        let parsed = parse_file(f.path()).unwrap();
-        assert_eq!(parsed.sections.len(), 3);
-        assert_eq!(parsed.sections[0].name, "main");
-        assert_eq!(parsed.sections[1].name, "clz");
-        assert_eq!(parsed.sections[2].name, "main");
-    }
-
-    #[test]
-    fn test_paste_task_above() {
-        let (f, mut app, mut list) = setup("# main\n- [ ] A\n- [ ] B\n");
-        app.focus = Focus::Right;
-        app.right_state.select(Some(1));
-
-        yank_task(&mut app, &list);
-        assert!(matches!(app.clipboard, Some(ClipboardItem::Task(_))));
-
-        paste_clipboard(&mut app, &mut list, f.path(), true).unwrap();
-        let parsed = parse_file(f.path()).unwrap();
-        assert_eq!(parsed.sections[0].tasks.len(), 3);
-        assert_eq!(parsed.sections[0].tasks[0].text, "A");
-        assert_eq!(parsed.sections[0].tasks[1].text, "B");
-        assert_eq!(parsed.sections[0].tasks[2].text, "B");
-    }
-
-    #[test]
-    fn test_paste_section_above() {
-        let (f, mut app, mut list) = setup("# main\n# clz\n");
-        app.focus = Focus::Left;
-        app.left_state.select(Some(0));
-
-        yank_tree_node(&mut app, &list);
-        assert!(matches!(app.clipboard, Some(ClipboardItem::Section(_))));
-
-        app.left_state.select(Some(1));
-        app.tree_items = build_tree_items(&list, &app.mode);
-        paste_clipboard(&mut app, &mut list, f.path(), true).unwrap();
-
-        let parsed = parse_file(f.path()).unwrap();
-        assert_eq!(parsed.sections.len(), 3);
-        assert_eq!(parsed.sections[0].name, "main");
-        assert_eq!(parsed.sections[1].name, "main");
-        assert_eq!(parsed.sections[2].name, "clz");
-    }
-
-    #[test]
-    fn test_a_on_top_level_creates_child() {
-        let (f, mut app, mut list) = setup("# main\n");
-        app.focus = Focus::Left;
-        app.left_state.select(Some(0));
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char('a')).unwrap();
-        match &app.mode {
-            Mode::InputSection {
-                node: None, parent, ..
-            } => {
-                assert_eq!(parent.as_deref(), Some([0].as_slice()));
-            }
-            other => panic!("expected InputSection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_capital_a_on_nested_creates_parent_level_above_subtree() {
-        let (f, mut app, mut list) = setup("# main\n## sub\n");
-        app.focus = Focus::Left;
-        app.tree_items = build_tree_items(&list, &app.mode);
-        let sub_pos = app
-            .tree_items
-            .iter()
-            .position(|n| matches!(n, TreeItem::Node(p) if p == &vec![0, 0]))
-            .unwrap();
-        app.left_state.select(Some(sub_pos));
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char('A')).unwrap();
-        match &app.mode {
-            Mode::InputSection {
-                node: None,
-                parent,
-                insert_idx,
-                ..
-            } => {
-                assert_eq!(*parent, None);
-                assert_eq!(*insert_idx, Some(0));
-            }
-            other => panic!("expected InputSection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_capital_a_on_top_level_inserts_above() {
-        let (f, mut app, mut list) = setup("# main\n# other\n");
-        app.focus = Focus::Left;
-        app.left_state.select(Some(1));
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char('A')).unwrap();
-        match &app.mode {
-            Mode::InputSection {
-                node: None,
-                parent,
-                insert_idx,
-                ..
-            } => {
-                assert_eq!(*parent, None);
-                assert_eq!(*insert_idx, Some(1));
-            }
-            other => panic!("expected InputSection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_o_creates_sibling_below() {
-        let (f, mut app, mut list) = setup("# main\n# other\n");
-        app.focus = Focus::Left;
-        app.left_state.select(Some(0));
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char('o')).unwrap();
-        match &app.mode {
-            Mode::InputSection {
-                node: None,
-                parent,
-                insert_idx,
-                ..
-            } => {
-                assert_eq!(*parent, None);
-                assert_eq!(*insert_idx, Some(1));
-            }
-            other => panic!("expected InputSection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_capital_o_creates_sibling_above() {
-        let (f, mut app, mut list) = setup("# main\n# other\n");
-        app.focus = Focus::Left;
-        app.left_state.select(Some(1));
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char('O')).unwrap();
-        match &app.mode {
-            Mode::InputSection {
-                node: None,
-                parent,
-                insert_idx,
-                ..
-            } => {
-                assert_eq!(*parent, None);
-                assert_eq!(*insert_idx, Some(1));
-            }
-            other => panic!("expected InputSection, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn test_colon_sorts_tasks_by_due_date() {
-        let content = "# main\n- [ ] C task due:2025-12-01\n- [ ] A task due:2025-01-15\n- [ ] B task\n";
-        let (f, mut app, mut list) = setup(content);
-        app.focus = Focus::Right;
-        app.left_state.select(Some(0));
-        app.right_state.select(Some(0));
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Char(':')).unwrap();
-
-        let parsed = parse_file(f.path()).unwrap();
-        assert_eq!(parsed.sections[0].tasks[0].text, "A task");
-        assert_eq!(
-            parsed.sections[0].tasks[0].due,
-            Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 15).unwrap())
-        );
-        assert_eq!(parsed.sections[0].tasks[1].text, "C task");
-        assert_eq!(parsed.sections[0].tasks[2].text, "B task");
-        assert!(parsed.sections[0].tasks[2].due.is_none());
-    }
-
-    #[test]
-    fn handle_filter_esc_saves_selected_node_for_restore() {
-        let (_f, mut app, list) = setup("# main\n## sub1\n- [ ] Task A\n## sub2\n- [ ] Task B\n");
-        app.tree_items = build_tree_items(&list, &app.mode);
-        app.left_state.select(Some(1));
-
-        handle_filter(&mut app, &list, KeyCode::Esc).unwrap();
-
-        assert!(app.filter.is_empty());
-        assert!(app.filter_lower.is_empty());
-        assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.filter_restore_node, Some(vec![0, 0]));
-    }
-
-    #[test]
-    fn handle_filter_enter_does_not_set_restore_node() {
-        let (_f, mut app, list) = setup("# main\n## sub1\n- [ ] Task A\n");
-        app.tree_items = build_tree_items(&list, &app.mode);
-        app.left_state.select(Some(1));
-
-        handle_filter(&mut app, &list, KeyCode::Enter).unwrap();
-
-        assert_eq!(app.filter_restore_node, None);
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn handle_normal_esc_saves_selected_node_for_restore() {
-        let (f, mut app, mut list) = setup("# main\n## sub1\n- [ ] Task A\n## sub2\n- [ ] Task B\n");
-        app.tree_items = build_tree_items(&list, &app.mode);
-        app.left_state.select(Some(1));
-        app.filter = "sub".to_string();
-        app.filter_lower = "sub".to_string();
-
-        handle_normal(&mut app, &mut list, f.path(), KeyCode::Esc).unwrap();
-
-        assert!(app.filter.is_empty());
-        assert!(app.filter_lower.is_empty());
-        assert_eq!(app.filter_restore_node, Some(vec![0, 0]));
-    }
+fn sort_tasks_by_due(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+    let Some(node) = selected_node(app) else {
+        return Ok(());
+    };
+    let Some(section) = get_node_mut(todo_list, &node) else {
+        return Ok(());
+    };
+    section
+        .tasks
+        .sort_by_key(|task| (task.due.is_none(), task.due));
+    write_file(path, todo_list)
 }
