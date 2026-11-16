@@ -11,6 +11,7 @@ use crate::tui::task_ref::TaskRef;
 use chrono::{Local, NaiveDate};
 use ratatui::widgets::ListState;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Which panel receives navigation keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +58,12 @@ pub enum PendingKey {
     Overdue,
 }
 
+/// How long the event loop waits before ticking the message timer.
+pub const MESSAGE_TICK: Duration = Duration::from_millis(250);
+
+/// Ticks a status message stays on screen: about three seconds.
+pub const MESSAGE_TICKS: u8 = 12;
+
 /// Severity of a transient status-bar message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MessageKind {
@@ -68,7 +75,7 @@ pub enum MessageKind {
     Error,
 }
 
-/// A short message shown in the status bar until the next key.
+/// A short message shown in the status bar until the next key or its timeout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     /// Human-readable text.
@@ -246,6 +253,9 @@ pub struct AppState {
     pub today: NaiveDate,
     /// Transient message shown on the next rendered status bar.
     pub message: Option<Message>,
+    /// Ticks `message` has been on screen; the clock is driven by the event
+    /// loop's poll timeout, so no thread is involved.
+    message_age: u8,
     /// Last known terminal height, used for bounded help scrolling.
     pub viewport_height: u16,
 }
@@ -283,6 +293,7 @@ impl AppState {
             hide_done: false,
             today,
             message: None,
+            message_age: 0,
             viewport_height: 24,
         }
     }
@@ -309,22 +320,45 @@ impl AppState {
 
     /// Show an informational message.
     pub fn set_info(&mut self, text: impl Into<String>) {
-        self.message = Some(Message::info(text));
+        self.set_message(Message::info(text));
     }
 
     /// Show a success message.
     pub fn set_success(&mut self, text: impl Into<String>) {
-        self.message = Some(Message::success(text));
+        self.set_message(Message::success(text));
     }
 
     /// Show an error message.
     pub fn set_error(&mut self, text: impl Into<String>) {
-        self.message = Some(Message::error(text));
+        self.set_message(Message::error(text));
+    }
+
+    /// Show a message, restarting its countdown.
+    pub fn set_message(&mut self, message: Message) {
+        self.message = Some(message);
+        self.message_age = 0;
     }
 
     /// Clear the current status message.
     pub fn clear_message(&mut self) {
         self.message = None;
+        self.message_age = 0;
+    }
+
+    /// Advance the status-message clock by one tick.
+    ///
+    /// Returns whether the message disappeared, so the caller can repaint only
+    /// when there is something new to show.
+    pub fn tick(&mut self) -> bool {
+        if self.message.is_none() {
+            return false;
+        }
+        self.message_age = self.message_age.saturating_add(1);
+        if self.message_age < MESSAGE_TICKS {
+            return false;
+        }
+        self.clear_message();
+        true
     }
 
     /// Clear the active filter.
@@ -395,6 +429,31 @@ mod tests {
         assert_eq!(app.message.as_ref().unwrap().kind, MessageKind::Error);
         app.clear_message();
         assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn a_message_expires_after_its_ticks() {
+        let mut app = AppState::new(0);
+        app.set_info("saved");
+        for _ in 0..MESSAGE_TICKS - 1 {
+            assert!(!app.tick(), "the message is still on screen");
+            assert!(app.message.is_some());
+        }
+        assert!(app.tick(), "the last tick clears the message");
+        assert!(app.message.is_none());
+        assert!(!app.tick(), "nothing left to clear");
+    }
+
+    #[test]
+    fn a_new_message_restarts_the_countdown() {
+        let mut app = AppState::new(0);
+        app.set_error("save failed");
+        for _ in 0..MESSAGE_TICKS - 1 {
+            app.tick();
+        }
+        app.set_error("save failed again");
+        assert!(!app.tick());
+        assert!(app.message.is_some(), "the countdown started over");
     }
 
     #[test]

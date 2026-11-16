@@ -51,7 +51,8 @@ tasks, including tasks from its subsections (marked with a `›` breadcrumb). A
 focused panel has an accent border and bold title. The bottom two lines are a
 context-sensitive hint bar and a status bar. The status bar shows the mode pill, a
 transient message (`saved`, `pasted`, errors), overall progress, and the file
-name. Due dates are right-aligned and coloured by urgency; completed tasks are
+name. A message clears itself after about three seconds, or as soon as the next
+key is pressed. Due dates are right-aligned and coloured by urgency; completed tasks are
 dimmed and struck through. A scrollbar appears at the panel's right edge only
 when its content overflows. Long task text is cut with `…` before the due
 column, and a row that is too narrow for its `Section ›` breadcrumb drops the

@@ -148,23 +148,51 @@ fn run_engine(terminal: &mut Terminal<CrosstermBackend<Stdout>>, path: &Path) ->
 
         let area = Rect::new(0, 0, columns, rows);
 
-        match event::read()? {
-            Event::Key(key) => {
+        match wait_for_input(&mut engine.app)? {
+            // Only a status message expired, so one repaint is enough.
+            Wake::Tick => continue,
+            Wake::Event(Event::Key(key)) => {
                 if is_action_key(key.kind)
                     && engine.handle_key(key.code, key.modifiers) == engine::Control::Quit
                 {
                     break;
                 }
             }
-            Event::Mouse(mouse) => handle_mouse(&mut engine.app, &engine.todo_list, area, mouse),
-            Event::Resize(_, _) => {
+            Wake::Event(Event::Mouse(mouse)) => {
+                handle_mouse(&mut engine.app, &engine.todo_list, area, mouse);
+            }
+            Wake::Event(Event::Resize(_, _)) => {
                 terminal.autoresize().context("resize terminal")?;
                 terminal.clear().context("clear terminal after resize")?;
             }
-            _ => {}
+            Wake::Event(_) => {}
         }
     }
     Ok(())
+}
+
+/// Why the event loop woke up.
+enum Wake {
+    /// An input event arrived.
+    Event(Event),
+    /// The status-message timer expired and the message was cleared.
+    Tick,
+}
+
+/// Wait for input, ticking the status-message clock while waiting.
+///
+/// `event::read` would block forever, so a message would stay in the status bar
+/// until the next key. Polling with a timeout instead lets it expire on its own;
+/// the timer is a counter in [`AppState`], not a thread.
+fn wait_for_input(app: &mut AppState) -> Result<Wake> {
+    loop {
+        if event::poll(state::MESSAGE_TICK)? {
+            return Ok(Wake::Event(event::read()?));
+        }
+        if app.tick() {
+            return Ok(Wake::Tick);
+        }
+    }
 }
 
 /// Whether a key event should run a command.
