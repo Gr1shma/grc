@@ -5,7 +5,7 @@
 //! references to the engine's document and UI state.
 
 use crate::parser::{FileStamp, parse_file, write_file};
-use crate::task::TodoList;
+use crate::task::{TodoList, get_node};
 use crate::tui::actions::{self, Action};
 use crate::tui::input;
 use crate::tui::state::{AppState, Mode, TreeItem};
@@ -218,20 +218,73 @@ impl Engine {
             .set_error("file changed on disk — r reload / o overwrite");
     }
 
+    /// Replace the document with the one on disk.
+    ///
+    /// Only the undo history is dropped: the view the user was looking at
+    /// (focus, folds, filter, selection) survives wherever the section or task
+    /// still exists, and the status bar says so when it does not.
     fn reload(&mut self) {
-        match parse_file(&self.path) {
-            Ok(todo_list) => {
-                let today = self.app.today;
-                self.todo_list = todo_list;
-                self.stamp = FileStamp::read(&self.path).ok().flatten();
-                self.app = AppState::new_with_today(self.todo_list.sections.len(), today);
-                self.undo.clear();
-                self.redo.clear();
-                self.app.set_success("reloaded from disk");
-                self.refresh();
+        let todo_list = match parse_file(&self.path) {
+            Ok(todo_list) => todo_list,
+            Err(error) => {
+                self.app.set_error(format!("reload failed: {error:#}"));
+                return;
             }
-            Err(error) => self.app.set_error(format!("reload failed: {error:#}")),
+        };
+
+        let node = selected_node(&self.app);
+        let task = node.as_ref().and_then(|node| {
+            let refs = self.refs_for(node);
+            self.app
+                .right_state
+                .selected()
+                .and_then(|row| refs.get(row).cloned())
+        });
+        let folded = self.app.folded.len();
+
+        self.todo_list = todo_list;
+        self.stamp = FileStamp::read(&self.path).ok().flatten();
+        self.undo.clear();
+        self.redo.clear();
+        self.app.mode = Mode::Normal;
+        self.app.clear_pending();
+        self.app.help_scroll = 0;
+        self.app.clipboard = None;
+        self.app.filter_anchor = None;
+        self.app.filter_restore = None;
+        // A fold for a section that is gone would fold nothing.
+        self.app
+            .folded
+            .retain(|path| get_node(&self.todo_list, path).is_some());
+
+        self.refresh();
+
+        let kept_node = node.is_some_and(|node| self.select_path(&node));
+        let kept_task = task.is_some_and(|task| {
+            let refs = self.refs_for(&task.node);
+            match find_task_position(&refs, &task) {
+                Some(position) => {
+                    self.app.right_state.select(Some(position));
+                    true
+                }
+                None => false,
+            }
+        });
+
+        let mut message = "reloaded from disk".to_string();
+        let mut reset = Vec::new();
+        if !kept_node {
+            reset.push("selection");
+        } else if !kept_task {
+            reset.push("task row");
         }
+        if folded != self.app.folded.len() {
+            reset.push("folds of sections that are gone");
+        }
+        if !reset.is_empty() {
+            message.push_str(&format!(" — reset: {}", reset.join(", ")));
+        }
+        self.app.set_success(message);
     }
 
     fn overwrite(&mut self) {
@@ -540,6 +593,71 @@ mod tests {
         fs::write(&engine.path, "# main\n- [ ] External\n").unwrap();
         assert_eq!(press(&mut engine, KeyCode::Char('q')), Control::Continue);
         assert_eq!(engine.app.mode, Mode::Conflict);
+    }
+
+    #[test]
+    fn reload_keeps_the_view_and_only_drops_the_undo_history() {
+        let (_dir, mut engine) = engine(
+            "# Work\n- [ ] Ship\n- [ ] Docs\n## Urgent\n- [ ] Fix bug\n# Home\n- [ ] Milk\n",
+        );
+        engine.app.focus = Focus::Right;
+        engine.app.folded.insert(vec![1]);
+        engine.app.right_state.select(Some(1));
+        press(&mut engine, KeyCode::Char('x'));
+        assert!(!engine.undo.is_empty());
+
+        engine.reload();
+
+        assert_eq!(engine.app.mode, Mode::Normal);
+        assert_eq!(engine.app.focus, Focus::Right);
+        assert!(engine.app.folded.contains(&vec![1]));
+        assert_eq!(selected_node(&engine.app), Some(vec![0]));
+        assert_eq!(engine.app.right_state.selected(), Some(1));
+        assert!(engine.undo.is_empty() && engine.redo.is_empty());
+        assert!(
+            engine
+                .app
+                .message
+                .as_ref()
+                .unwrap()
+                .text
+                .starts_with("reloaded")
+        );
+    }
+
+    #[test]
+    fn reload_keeps_the_filter() {
+        let (_dir, mut engine) = engine("# Work\n- [ ] Ship\n# Home\n- [ ] Milk\n");
+        engine.app.set_filter("milk".into());
+        engine.refresh();
+        assert_eq!(engine.app.tree_items.len(), 1);
+
+        engine.reload();
+
+        assert_eq!(engine.app.filter, "milk");
+        assert_eq!(engine.app.filter_lower, "milk");
+        assert_eq!(engine.app.tree_items.len(), 1);
+    }
+
+    #[test]
+    fn reload_reports_a_selection_that_no_longer_exists() {
+        let (_dir, mut engine) = engine("# Work\n- [ ] Ship\n# Home\n- [ ] Milk\n");
+        engine.app.left_state.select(Some(1));
+        fs::write(&engine.path, "# Work\n- [ ] Ship\n").unwrap();
+
+        engine.reload();
+
+        assert_eq!(engine.todo_list.sections.len(), 1);
+        assert_eq!(engine.app.left_state.selected(), Some(0));
+        assert!(
+            engine
+                .app
+                .message
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("reset: selection")
+        );
     }
 
     #[test]
