@@ -35,24 +35,25 @@ GRC_TODO_PATH=/path/to/todo.md grc
 ## Interface
 
 ```
-╭ Sections ─────────╮╭ Work ───────────────────────────────────────────╮
-│▾ Work         1/5 ││☐ Ship release                            today │
-│    Urgent     0/2 ││☑ Write docs                                    │
-│  Home        0/1 ││☐ Plan next week                    Mar 1, 2027 │
-│                  ││☐ Urgent › Fix bug                           tmr │
-│                  ││☐ Urgent › Call back                            │
-╰───────────────────╯╰─────────────────────────────────────────────────╯
+╭ Sections ───────╮╭ Work ─────────────────────────────────────────────╮
+│ ▾ Work       1/5││ ☐ Ship release                              today │
+│ │   Urgent   0/2││ ☑ Write docs                                      │
+│   Home       0/1││ ☐ Plan next week                      Mar 1, 2027 │
+│                 ││ ☐ Urgent › Fix bug                            tmr │
+│                 ││ ☐ Urgent › Call back                              │
+╰─────────────────╯╰───────────────────────────────────────────────────╯
  j/k move  ·  x toggle  ·  a/o add  ·  i edit  ·  t due  ·  ? help
- NORMAL                                              1/6  todo.md
+ NORMAL                                                    1/6  todo.md
 ```
 
 The left panel is the section tree; the right panel shows the selected section's
-tasks. A focused panel has an accent border and bold title. The bottom two lines
-are a context-sensitive hint bar and a status bar. The status bar shows the mode
-pill, a transient message (`saved`, `pasted`, errors), overall progress, and the
-file name. Due dates are right-aligned and coloured by urgency; completed tasks
-are dimmed and struck through. A scrollbar appears at the panel's right edge
-only when its content overflows.
+tasks, including tasks from its subsections (marked with a `›` breadcrumb). A
+focused panel has an accent border and bold title. The bottom two lines are a
+context-sensitive hint bar and a status bar. The status bar shows the mode pill, a
+transient message (`saved`, `pasted`, errors), overall progress, and the file
+name. Due dates are right-aligned and coloured by urgency; completed tasks are
+dimmed and struck through. A scrollbar appears at the panel's right edge only
+when its content overflows.
 
 Set `NO_COLOR=1` to disable colour, and `GRC_ASCII=1` for ASCII checkboxes
 (`[ ]` / `[x]`), fold markers (`>` / `v`), and scrollbars. Neither option
@@ -83,7 +84,8 @@ ignore it.
 | Key | Action |
 |-----|--------|
 | `l` / `Enter` / `Tab` | Focus the task panel |
-| `a` / `A` | New child section / new section above the current level |
+| `a` | New child section under the selected one |
+| `A` | New section above the selected section's parent (same as `O` for top-level sections) |
 | `o` / `O` | New section at the same level below / above |
 | `i` | Rename the selected section |
 | `dd` | Delete the section and its subtree |
@@ -104,8 +106,8 @@ ignore it.
 | `dd` / `3dd` | Delete selected task / next three tasks |
 | `yy` / `p` / `P` | Yank task / paste below / paste above |
 | `:` | Recursively sort the selected section by due date |
-| `J` / `K` | Move the task down / up among its siblings |
-| `]d` | Jump to the next overdue task (wraps, skips completed) |
+| `J` / `K` | Move the task down / up among its visible siblings |
+| `]d` | Jump to the next overdue task in the file (wraps, skips completed) |
 | `H` | Hide or show completed tasks |
 
 ### Text inputs, filter, help, and conflict
@@ -119,6 +121,13 @@ ignore it.
 | type, `Backspace`, `Enter`, `Esc` | Filter prompt: append, delete, apply, clear |
 | `j` / `k`, `Esc` / `q` / `?` | Scroll / close the help overlay |
 | `r` / `o` | On an external-change conflict: reload / overwrite |
+
+### Mouse
+
+Mouse capture is always on. The wheel moves the selection in the focused panel
+(it scrolls the help overlay while that is open), and a left click focuses the
+clicked panel and selects the row under the cursor, honouring any scrolling.
+Clicking outside the help overlay closes it.
 
 The filter is an append-only prompt: `Backspace` removes the last character.
 Text inputs (task, section, due date) use the full cursor editor above.

@@ -7,14 +7,14 @@
 │           │    h/Esc/Tab           back to sections              │           │
 │           │    J / K               move task/section             │           │
 │           │    za / zM / zR        fold / fold all / unfold all  │           │
-│           │    ]d                  next overdue                  │           │
+│           │    ]d                  next overdue task in the file │           │
 │           │    H                   hide/show completed           │           │
 │           │    q / Ctrl-c          quit                          │           │
 │           │                                                      │           │
 │           │  Edit                                                │           │
-│           │    a / A               new section below (level)     │           │
-│           │    o / O               new section below/above       │           │
-│           │    i / dd              rename / delete section       │           │
-╰───────────│    yy / p / P          yank / paste below / above    │───────────╯
- j/k scroll │    a / A / o / O       add task (A appends)          │            
+│           │    a                   new child section             │           │
+│           │    A                   new section above the parent  │           │
+│           │    o / O               new section below / above     │           │
+╰───────────│    i / dd              rename / delete section       │───────────╯
+ j/k scroll │    yy / p / P          yank / paste below / above    │            
  HELP  j/k s╰──────────────────────────────────────────────────────╯/6  todo.md 
