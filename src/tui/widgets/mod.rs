@@ -29,7 +29,7 @@ pub fn panel<'a>(theme: &Theme, title: &str, focused: bool) -> Block<'a> {
         .border_type(BORDER_TYPE)
         .title(Span::styled(format!(" {title} "), theme.title(focused)))
         .border_style(theme.border(focused))
-        .style(theme.base_style())
+        .style(theme.panel_style())
 }
 
 /// Number of terminal cells a string occupies in the common case.

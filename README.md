@@ -66,10 +66,21 @@ is chosen against the background it can land on and checked in the test suite fo
 at least a 4.5:1 contrast ratio (3:1 for decorative glyphs such as the tree
 guides), so dim metadata stays readable under the bar.
 
-`grc` paints its own background. Set `NO_COLOR=1` to disable colour and inherit
-the terminal's, and `GRC_ASCII=1` for ASCII checkboxes (`[ ]` / `[x]`), fold
-markers (`>` / `v`), and scrollbars. Without colour the selected row is marked by
-the `▌` gutter bar and bold text. Neither option changes the file format.
+By default `grc` does not paint a background: the terminal's own shows through,
+so a transparent or translucent terminal profile keeps working. The selection
+bar and popups are always painted, because text on them has to be readable
+whatever is behind it. Set `GRC_BG=1` to fill the canvas with the dark panel
+colour instead, `NO_COLOR=1` to drop all colour and inherit the terminal's, and
+`GRC_ASCII=1` for ASCII checkboxes (`[ ]` / `[x]`), fold markers (`>` / `v`),
+and scrollbars. Without colour the selected row is marked by the `▌` gutter bar
+and bold text. None of these change the file format.
+
+Colour depth follows `COLORTERM`: with `COLORTERM=truecolor` (or `24bit`) `grc`
+uses its own RGB palette, and otherwise it falls back to the sixteen named ANSI
+colours, where the selection bar is `DarkGray` carrying black text. Coloured
+accents are chosen against a dark background, so on a light terminal set
+`NO_COLOR=1` (inherit the terminal's colours) or `GRC_BG=1` (use the tested dark
+canvas).
 
 Checkboxes use `□` and `✓` rather than `☐` and `☑`: the ballot-box pair is in
 the emoji set, and a terminal that draws it with an emoji font makes that line

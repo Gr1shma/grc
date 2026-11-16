@@ -69,10 +69,11 @@ pub fn panel_split(area: Rect) -> [Rect; 2] {
 /// Draw the whole interface from immutable state.
 pub fn draw_ui(f: &mut Frame, todo_list: &TodoList, app: &AppState, theme: &Theme, path: &Path) {
     let area = f.area();
-    // The palette is defined against a fixed canvas, so paint it before any
-    // row: without this the selection tint would sit on the terminal's own
-    // background and every contrast guarantee would be void.
-    f.render_widget(Block::default().style(theme.base_style()), area);
+    // The canvas is the terminal's own background unless `GRC_BG=1` asked for
+    // ours; painting it always would break transparency.
+    if theme.paints_canvas() {
+        f.render_widget(Block::default().style(theme.canvas_style()), area);
+    }
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -561,6 +562,64 @@ mod tests {
             }
         }
         assert_eq!(theme.selection_style(true).bg, None);
+    }
+
+    #[test]
+    fn a_transparent_theme_paints_only_the_selection_bars() {
+        let (todo, mut app) = selection_state();
+        app.right_state.select(Some(1));
+        // No `GRC_BG`: the terminal's background shows through everywhere but
+        // the two selection bars.
+        let theme = Theme::truecolor(false, false);
+        let buffer = cells(72, 14, &todo, &app, &theme);
+        let [left, right] = panel_split(Rect::new(0, 0, 72, 12));
+        // The bars cover the lists' inner width; the panel borders are chrome.
+        let inside = |panel: Rect| (panel.x + 1)..(panel.x + panel.width - 1);
+        for x in inside(right) {
+            assert_eq!(buffer[(x, 2)].bg, theme.selection, "({x},2) lost the bar");
+        }
+        for x in inside(left) {
+            assert_eq!(
+                buffer[(x, 1)].bg,
+                theme.selection_unfocused,
+                "({x},1) lost the unfocused bar"
+            );
+        }
+        // Only the panels: the status bar paints its own mode pill, which is
+        // checked by its own test.
+        for y in 0..12 {
+            for x in 0..72 {
+                let on_a_bar =
+                    (y == 2 && inside(right).contains(&x)) || (y == 1 && inside(left).contains(&x));
+                assert!(
+                    on_a_bar || buffer[(x, y)].bg == Color::Reset,
+                    "({x},{y}) painted a background the user did not ask for"
+                );
+            }
+        }
+        // Unselected text is left to the terminal, so a light terminal theme
+        // supplies the contrast instead of fighting ours.
+        assert_eq!(buffer[(right.x + 2, 3)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn a_popup_paints_its_own_background_on_a_transparent_canvas() {
+        let (todo, mut app) = normal_state();
+        app.mode = Mode::Help;
+        app.viewport_height = 20;
+        prepare(&mut app, &todo);
+        let theme = Theme::truecolor(false, false);
+        let buffer = cells(80, 20, &todo, &app, &theme);
+        let popup = crate::tui::help_popup(Rect::new(0, 0, 80, 20));
+        for y in popup.y..popup.y + popup.height {
+            for x in popup.x..popup.x + popup.width {
+                assert_eq!(
+                    buffer[(x, y)].bg,
+                    theme.surface,
+                    "({x},{y}) let the panel show through the popup"
+                );
+            }
+        }
     }
 
     const NO_COLOUR: &str = include_str!("snapshots/no_colour.txt");

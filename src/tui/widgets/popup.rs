@@ -28,5 +28,7 @@ pub fn dialog<'a>(theme: &Theme, title: impl Into<String>) -> Block<'a> {
             theme.dialog_title(),
         ))
         .border_style(theme.dialog_border())
-        .style(theme.base_style())
+        // Always painted, transparent canvas or not: a popup that let the rows
+        // underneath show through would be unreadable.
+        .style(theme.popup_style())
 }
