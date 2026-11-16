@@ -7,11 +7,6 @@
 
 use chrono::{Datelike, Local, NaiveDate, Weekday};
 
-/// Parse a due-date expression using the current local date.
-pub fn resolve_relative_date(input: &str) -> Option<NaiveDate> {
-    resolve_relative_date_from(input, Local::now().date_naive())
-}
-
 /// Parse a due-date expression relative to `today`.
 ///
 /// Recognised forms are documented in the README: absolute dates, single-word
@@ -401,6 +396,37 @@ mod tests {
         assert_eq!(
             resolve_relative_date_from("this tuesday", monday),
             Some(date(2025, 7, 22))
+        );
+    }
+
+    #[test]
+    fn bare_weekday_on_the_same_day_is_strictly_next_week() {
+        let monday = date(2025, 7, 21);
+        assert_eq!(
+            resolve_relative_date_from("mon", monday),
+            Some(date(2025, 7, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("monday", monday),
+            Some(date(2025, 7, 28))
+        );
+    }
+
+    #[test]
+    fn this_weekday_includes_today_while_next_weekday_excludes_it() {
+        let monday = date(2025, 7, 21);
+        assert_eq!(resolve_relative_date_from("this mon", monday), Some(monday));
+        assert_eq!(
+            resolve_relative_date_from("next mon", monday),
+            Some(date(2025, 7, 28))
+        );
+        assert_eq!(
+            resolve_relative_date_from("this sun", monday),
+            Some(date(2025, 7, 27))
+        );
+        assert_eq!(
+            resolve_relative_date_from("next sun", monday),
+            Some(date(2025, 7, 27))
         );
     }
 

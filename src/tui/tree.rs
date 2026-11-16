@@ -6,9 +6,14 @@
 
 use crate::task::{NodePath, Section, Task, TodoList, get_node};
 use crate::tui::state::{AppState, Mode, TreeItem};
+use std::collections::HashSet;
 
-/// Flatten every section into depth-first rows.
-pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
+/// Flatten every unfolded section into depth-first rows.
+pub fn build_tree_items(
+    todo_list: &TodoList,
+    mode: &Mode,
+    folded: &HashSet<NodePath>,
+) -> Vec<TreeItem> {
     let ghost = match mode {
         Mode::InputSection(input) if input.node.is_none() => {
             Some((input.parent.clone(), input.insert_idx))
@@ -17,22 +22,31 @@ pub fn build_tree_items(todo_list: &TodoList, mode: &Mode) -> Vec<TreeItem> {
     };
 
     let mut items = Vec::new();
-    walk_tree(&mut items, ghost.as_ref(), None, &todo_list.sections, 0);
+    walk_tree(
+        &mut items,
+        ghost.as_ref(),
+        None,
+        &todo_list.sections,
+        0,
+        folded,
+    );
     items
 }
 
-/// Flatten sections for the active filter.
+/// Flatten sections for the active filter, fold state, and hide-done setting.
 ///
 /// Section-name matches take priority; if no section name matches, sections
-/// that contain matching tasks remain visible. Section input bypasses filtering
-/// so the ghost row stays reachable.
+/// that contain matching visible tasks remain visible. Section input bypasses
+/// filtering so the ghost row stays reachable.
 pub fn build_visible_tree_items(
     todo_list: &TodoList,
     mode: &Mode,
     filter_lower: &str,
+    folded: &HashSet<NodePath>,
+    hide_done: bool,
 ) -> Vec<TreeItem> {
     if filter_lower.is_empty() || mode.is_section_input() {
-        return build_tree_items(todo_list, mode);
+        return build_tree_items(todo_list, mode, folded);
     }
 
     let mut name_matched_paths = Vec::new();
@@ -42,10 +56,18 @@ pub fn build_visible_tree_items(
         &todo_list.sections,
         filter_lower,
     );
+    name_matched_paths.retain(|path| !is_under_folded(path, folded));
 
     if name_matched_paths.is_empty() {
         let mut items = Vec::new();
-        walk_tree_filtered_by_task(&mut items, None, &todo_list.sections, filter_lower);
+        walk_tree_filtered_by_task(
+            &mut items,
+            None,
+            &todo_list.sections,
+            filter_lower,
+            folded,
+            hide_done,
+        );
         return items;
     }
 
@@ -53,6 +75,9 @@ pub fn build_visible_tree_items(
     for path in &name_matched_paths {
         for depth in 0..path.len() {
             let ancestor = path[..=depth].to_vec();
+            if is_under_folded(&ancestor, folded) {
+                continue;
+            }
             if !items
                 .iter()
                 .any(|item| matches!(item, TreeItem::Node(p) if *p == ancestor))
@@ -62,6 +87,10 @@ pub fn build_visible_tree_items(
         }
     }
     items
+}
+
+fn is_under_folded(path: &NodePath, folded: &HashSet<NodePath>) -> bool {
+    (0..path.len()).any(|depth| folded.contains(&path[..depth].to_vec()))
 }
 
 fn collect_section_name_matches(
@@ -85,26 +114,37 @@ fn walk_tree_filtered_by_task(
     parent: Option<&NodePath>,
     children: &[Section],
     filter_lower: &str,
+    folded: &HashSet<NodePath>,
+    hide_done: bool,
 ) {
     for (index, child) in children.iter().enumerate() {
         let mut path = parent.map_or_else(Vec::new, Clone::clone);
         path.push(index);
-        if subtree_has_matching_task(child, filter_lower) {
+        if subtree_has_matching_task(child, filter_lower, hide_done) {
             items.push(TreeItem::Node(path.clone()));
-            walk_tree_filtered_by_task(items, Some(&path), &child.children, filter_lower);
+            if !folded.contains(&path) {
+                walk_tree_filtered_by_task(
+                    items,
+                    Some(&path),
+                    &child.children,
+                    filter_lower,
+                    folded,
+                    hide_done,
+                );
+            }
         }
     }
 }
 
-fn subtree_has_matching_task(section: &Section, filter_lower: &str) -> bool {
+fn subtree_has_matching_task(section: &Section, filter_lower: &str, hide_done: bool) -> bool {
     section
         .tasks
         .iter()
-        .any(|task| task_matches(task, filter_lower))
+        .any(|task| task_matches(task, filter_lower) && !(hide_done && task.is_done))
         || section
             .children
             .iter()
-            .any(|child| subtree_has_matching_task(child, filter_lower))
+            .any(|child| subtree_has_matching_task(child, filter_lower, hide_done))
 }
 
 /// Whether a section name contains the (lowercase) filter.
@@ -129,6 +169,7 @@ fn walk_tree(
     parent: Option<&NodePath>,
     children: &[Section],
     depth: usize,
+    folded: &HashSet<NodePath>,
 ) {
     for (index, child) in children.iter().enumerate() {
         if ghost.is_some_and(|(ghost_parent, insert_at)| {
@@ -140,7 +181,16 @@ fn walk_tree(
         let mut path = parent.map_or_else(Vec::new, Clone::clone);
         path.push(index);
         items.push(TreeItem::Node(path.clone()));
-        walk_tree(items, ghost, Some(&path), &child.children, depth + 1);
+        if !folded.contains(&path) {
+            walk_tree(
+                items,
+                ghost,
+                Some(&path),
+                &child.children,
+                depth + 1,
+                folded,
+            );
+        }
     }
 
     if ghost.is_some_and(|(ghost_parent, insert_at)| {
@@ -148,18 +198,6 @@ fn walk_tree(
             && (insert_at.is_none() || *insert_at == Some(children.len()))
     }) {
         items.push(TreeItem::Ghost(depth));
-    }
-}
-
-/// Rebuild the unfiltered tree and select `path` when it still exists.
-pub fn rebuild_and_select(app: &mut AppState, todo_list: &TodoList, path: &NodePath) {
-    app.tree_items = build_tree_items(todo_list, &app.mode);
-    if let Some(position) = app
-        .tree_items
-        .iter()
-        .position(|item| matches!(item, TreeItem::Node(p) if p == path))
-    {
-        app.left_state.select(Some(position));
     }
 }
 
@@ -274,7 +312,7 @@ mod tests {
 
     #[test]
     fn normal_tree_is_depth_first() {
-        let items = build_tree_items(&sample(), &Mode::Normal);
+        let items = build_tree_items(&sample(), &Mode::Normal, &HashSet::new());
         assert_eq!(
             items,
             vec![
@@ -288,18 +326,20 @@ mod tests {
 
     #[test]
     fn empty_tree() {
-        assert!(build_tree_items(&TodoList::default(), &Mode::Normal).is_empty());
+        assert!(build_tree_items(&TodoList::default(), &Mode::Normal, &HashSet::new()).is_empty());
     }
 
     #[test]
     fn filter_by_section_name_case_insensitively() {
-        let items = build_visible_tree_items(&sample(), &Mode::Normal, "personal");
+        let items =
+            build_visible_tree_items(&sample(), &Mode::Normal, "personal", &HashSet::new(), false);
         assert_eq!(items, vec![TreeItem::Node(vec![1])]);
     }
 
     #[test]
     fn filter_keeps_ancestors_of_matching_task() {
-        let items = build_visible_tree_items(&sample(), &Mode::Normal, "endpoint");
+        let items =
+            build_visible_tree_items(&sample(), &Mode::Normal, "endpoint", &HashSet::new(), false);
         assert_eq!(
             items,
             vec![
@@ -314,7 +354,8 @@ mod tests {
     fn section_name_matches_take_priority_over_task_matches() {
         let mut list = sample();
         list.sections[0].tasks[0].text = "personal notes".into();
-        let items = build_visible_tree_items(&list, &Mode::Normal, "personal");
+        let items =
+            build_visible_tree_items(&list, &Mode::Normal, "personal", &HashSet::new(), false);
         assert_eq!(items, vec![TreeItem::Node(vec![1])]);
     }
 
@@ -322,7 +363,8 @@ mod tests {
     fn filter_by_due_date() {
         let mut list = sample();
         list.sections[1].tasks[0].due = Some(chrono::NaiveDate::from_ymd_opt(2025, 6, 15).unwrap());
-        let items = build_visible_tree_items(&list, &Mode::Normal, "2025-06");
+        let items =
+            build_visible_tree_items(&list, &Mode::Normal, "2025-06", &HashSet::new(), false);
         assert_eq!(items, vec![TreeItem::Node(vec![1])]);
     }
 
@@ -372,7 +414,7 @@ mod tests {
             level: 2,
             field: crate::tui::state::TextField::default(),
         };
-        let items = build_tree_items(&list, &Mode::InputSection(input));
+        let items = build_tree_items(&list, &Mode::InputSection(input), &HashSet::new());
         assert_eq!(items[1], TreeItem::Ghost(1));
     }
 

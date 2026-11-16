@@ -49,12 +49,12 @@ Press `?` inside the app to open the full help overlay.
 | `o` | New heading at same level, **below** current |
 | `O` | New heading at same level, **above** current |
 | `i` | Rename / edit heading |
-| `t` | Set due date (empty to clear) |
+| `t` | Set due date (empty clears; invalid input keeps the old date) |
 | `x` / `Space` | Toggle done |
 | `dd` | Delete |
 | `yy` / `p` / `P` | Yank / paste below / paste above |
 | `gg` / `G` | Jump top / bottom |
-| `:` | Sort tasks by due date (task panel) |
+| `:` | Recursively sort the selected section by due date (task panel) |
 | `q` | Quit |
 
 ## Due Date Shortcuts
@@ -68,16 +68,22 @@ When setting a due date with `t`, you can type any of:
 | `today` `tod` `t` | Today |
 | `tomorrow` `tmr` `tmw` `tom` | Tomorrow |
 | `next week` `nextweek` `nw` | 7 days from today |
-| `sun`/`mon`/.../`sat` | Next occurrence of that weekday (also full names) |
-| `next mon` `next monday` | Next occurrence of that weekday |
-| `this monday` | This/next occurrence of that weekday |
+| `sun`/`mon`/.../`sat` | Strictly next occurrence of that weekday (also full names) |
+| `next mon` `next monday` | Strictly future occurrence (same as a bare weekday) |
+| `this monday` | That weekday today if it is today, otherwise the next occurrence |
 | `+3d` `-2d` `+2w` `+1m` `+1y` | Relative offset (days/weeks/calendar months/years) |
 | `in 3 days` `in 2 weeks` | Relative offset (also months/years) |
 | `jun 15` `june 15` | Month name + day (current year, next year if passed) |
 
-Leave the field empty and press `Enter` to clear the due date.
+Weekday edge cases are deliberate:
 
-You can also embed a due date inline when creating or renaming a task (press `t`/`a`/`o`/`i`). Type the task text followed by ` due:` and any of the shortcuts above, and the date is parsed automatically while the `due:` token is stripped from the task text:
+- A bare weekday is always strictly in the future. On a Monday, `mon` means the following Monday.
+- `this monday` includes today, so on a Monday it means today.
+- `next monday` is always in the future, so on a Monday it means the following Monday.
+
+Leave the due-date field empty and press `Enter` to clear the date. Invalid input shows an error and keeps the existing date; it never clears it.
+
+You can also embed a due date inline when creating or renaming a task (press `a`/`o`/`i`). Type the task text followed by ` due:` and any of the shortcuts above, and the date is parsed automatically while the `due:` token is stripped from the task text:
 
 ```
 Submit report due:2025-06-15
@@ -87,6 +93,27 @@ Pay rent due:2025/06/15
 ```
 
 Only a parseable date is removed. Unrecognized `due:` text is left as part of the task.
+
+## Sorting
+
+`:`, in the task panel, recursively sorts every task in the selected section and its subsections. Within each section the stable order is:
+
+1. undone tasks before completed tasks;
+2. earlier due dates before later ones;
+3. tasks without a due date last.
+
+## Saving and external changes
+
+Every document change is written immediately with an atomic replace, and `q` saves once more before leaving. If the todo path is a symlink, `grc` writes to the link target and never replaces the symlink itself.
+
+Before each save, `grc` compares the file's modification time and length with the last load/save. If another program changed the file, `grc` does not overwrite it silently: the status bar shows a conflict and:
+
+- `r` reloads the file from disk (discarding in-memory changes);
+- `o` overwrites the file with the in-memory document.
+
+Save errors and conflicts appear in the status bar instead of closing the terminal. Quitting retries the save.
+
+Tasks before the first heading are preserved in the Markdown file but are not editable in the TUI; when present, the status bar reports how many there are.
 
 ## File Format
 

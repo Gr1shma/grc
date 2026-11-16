@@ -36,7 +36,7 @@ pub fn draw_right(f: &mut Frame, todo_list: &TodoList, app: &mut AppState, area:
         .border_style(Style::default().fg(border_color));
 
     let task_refs = selected_node(app)
-        .map(|node| get_task_refs_filtered(todo_list, &node, &app.filter_lower))
+        .map(|node| get_task_refs_filtered(todo_list, &node, &app.filter_lower, app.hide_done))
         .unwrap_or_default();
 
     let inner_w = area.width.saturating_sub(6) as usize;

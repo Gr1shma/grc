@@ -92,6 +92,16 @@ impl Section {
     pub fn count_tasks(&self) -> usize {
         self.tasks.len() + self.children.iter().map(Self::count_tasks).sum::<usize>()
     }
+
+    /// Count completed tasks in this section and all descendants.
+    pub fn count_done_tasks(&self) -> usize {
+        self.tasks.iter().filter(|task| task.is_done).count()
+            + self
+                .children
+                .iter()
+                .map(Self::count_done_tasks)
+                .sum::<usize>()
+    }
 }
 
 /// Root of a parsed todo document.
@@ -121,6 +131,31 @@ impl Default for TodoList {
             line_ending: LineEnding::Lf,
             final_newline: true,
         }
+    }
+}
+
+impl TodoList {
+    /// Count every task, including unsectioned tasks and descendants.
+    pub fn count_tasks(&self) -> usize {
+        self.unsectioned_tasks.len()
+            + self
+                .sections
+                .iter()
+                .map(Section::count_tasks)
+                .sum::<usize>()
+    }
+
+    /// Count every completed task in the document.
+    pub fn count_done_tasks(&self) -> usize {
+        self.unsectioned_tasks
+            .iter()
+            .filter(|task| task.is_done)
+            .count()
+            + self
+                .sections
+                .iter()
+                .map(Section::count_done_tasks)
+                .sum::<usize>()
     }
 }
 
@@ -284,6 +319,21 @@ mod tests {
         let list = sample();
         assert_eq!(list.sections[0].count_tasks(), 4);
         assert_eq!(list.sections[1].count_tasks(), 1);
+        assert_eq!(list.count_tasks(), 5);
+    }
+
+    #[test]
+    fn done_counts_include_descendants_and_unsectioned() {
+        let mut list = sample();
+        list.sections[0].tasks[0].is_done = true;
+        list.sections[0].children[0].children[0].tasks[0].is_done = true;
+        let mut orphan = Task::new("orphan");
+        orphan.is_done = true;
+        list.unsectioned_tasks.push(orphan);
+
+        assert_eq!(list.sections[0].count_done_tasks(), 2);
+        assert_eq!(list.count_done_tasks(), 3);
+        assert_eq!(list.count_tasks(), 6);
     }
 
     #[test]

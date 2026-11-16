@@ -1,96 +1,104 @@
 //! Normal-mode key handling.
 //!
-//! Navigation, two-key commands, filtering, and document mutations live here.
-//! Every mutation writes the document immediately; there is no unsaved state.
+//! Navigation and mode changes mutate only ephemeral UI state. Document edits
+//! are returned as [`Action`] values and applied centrally by the engine.
 
-use crate::parser::write_file;
-use crate::task::{
-    NodePath, Section, TodoList, child_count, get_node, get_node_mut, insert_section,
-    remove_section, task_count,
-};
+use crate::task::{NodePath, Section, TodoList, get_node};
+use crate::tui::actions::Action;
 use crate::tui::state::{
     AppState, ClipboardItem, Focus, Mode, PendingKey, SectionInput, SelectionSnapshot, TaskInput,
     TextField,
 };
-use crate::tui::task_ref::{
-    TaskRef, get_task_from_ref, get_task_from_ref_mut, get_task_refs_filtered,
-};
-use crate::tui::tree::{
-    build_visible_tree_items, clamp_left_selection, clamp_right_selection, node_level, node_name,
-    selected_node,
-};
-use anyhow::Result;
-use crossterm::event::KeyCode;
-use std::path::Path;
+use crate::tui::task_ref::{TaskRef, get_task_from_ref, get_task_refs_filtered};
+use crate::tui::tree::{node_level, node_name, selected_node};
+use crossterm::event::{KeyCode, KeyModifiers};
+use std::collections::HashSet;
 
 /// Handle a key in normal navigation mode.
-///
-/// Returns `true` when the application should quit.
 pub fn handle_normal(
     app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
+    todo_list: &TodoList,
     code: KeyCode,
-) -> Result<bool> {
-    if handle_pending(app, todo_list, path, code)? {
-        return Ok(false);
+    modifiers: KeyModifiers,
+) -> Vec<Action> {
+    if app.pending == PendingKey::None
+        && let KeyCode::Char(character) = code
+        && let Some(digit) = character.to_digit(10)
+    {
+        app.push_count_digit(digit as usize);
+        return Vec::new();
     }
 
+    if app.pending != PendingKey::None {
+        let count = app.take_count();
+        return handle_pending(app, todo_list, code, count);
+    }
+
+    // Pending-key commands keep the count until the second key (`3dd`).
+    let pending_starter = matches!(code, KeyCode::Char('d' | 'g' | 'y' | 'z' | ']'));
+    let count = if pending_starter {
+        app.count.unwrap_or(1)
+    } else {
+        app.take_count()
+    };
     match code {
+        KeyCode::Char('r') if modifiers.contains(KeyModifiers::CONTROL) => {
+            vec![Action::Redo]
+        }
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
-            return Ok(false);
+            Vec::new()
         }
-        KeyCode::Char(':') if app.focus == Focus::Right => {
-            sort_tasks_by_due(app, todo_list, path)?;
-            return Ok(false);
-        }
+        KeyCode::Char(':') if app.focus == Focus::Right => selected_node(app)
+            .map(|node| vec![Action::Sort { node }])
+            .unwrap_or_default(),
         KeyCode::Char('/') => {
             app.filter_anchor = selected_node(app);
             app.mode = Mode::Filter;
-            return Ok(false);
+            Vec::new()
         }
         KeyCode::Esc if !app.filter.is_empty() => {
             remember_selection(app, todo_list);
-            clear_filter(app);
-            return Ok(false);
+            app.clear_filter();
+            Vec::new()
         }
-        _ => {}
-    }
-
-    match app.focus {
-        Focus::Left => handle_left(app, todo_list, path, code),
-        Focus::Right => handle_right(app, todo_list, path, code),
+        _ => match app.focus {
+            Focus::Left => handle_left(app, todo_list, code, count),
+            Focus::Right => handle_right(app, todo_list, code, count),
+        },
     }
 }
 
-/// Handle the second key of `dd`, `gg`, or `yy`.
-///
-/// The prefix is consumed by every key: an unrelated key cancels the command
-/// and is not also executed, matching the previous behaviour.
 fn handle_pending(
     app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
+    todo_list: &TodoList,
     code: KeyCode,
-) -> Result<bool> {
+    count: usize,
+) -> Vec<Action> {
     let pending = std::mem::replace(&mut app.pending, PendingKey::None);
     match pending {
-        PendingKey::None => Ok(false),
+        PendingKey::None => Vec::new(),
         PendingKey::Delete => {
-            if code == KeyCode::Char('d') {
-                match app.focus {
-                    Focus::Left => delete_section(app, todo_list, path)?,
-                    Focus::Right => delete_task(app, todo_list, path)?,
+            if code != KeyCode::Char('d') {
+                return Vec::new();
+            }
+            match app.focus {
+                Focus::Left => selected_node(app)
+                    .map(|path| vec![Action::DeleteSection { path }])
+                    .unwrap_or_default(),
+                Focus::Right => {
+                    let targets = selected_task_targets(app, todo_list, count);
+                    (!targets.is_empty())
+                        .then_some(vec![Action::DeleteTasks { targets }])
+                        .unwrap_or_default()
                 }
             }
-            Ok(true)
         }
         PendingKey::Goto => {
             if code == KeyCode::Char('g') {
                 jump_to_top(app, todo_list);
             }
-            Ok(true)
+            Vec::new()
         }
         PendingKey::Yank => {
             if code == KeyCode::Char('y') {
@@ -99,91 +107,40 @@ fn handle_pending(
                     Focus::Right => yank_task(app, todo_list),
                 }
             }
-            Ok(true)
+            Vec::new()
         }
-    }
-}
-
-fn jump_to_top(app: &mut AppState, todo_list: &TodoList) {
-    match app.focus {
-        Focus::Left => {
-            if app.tree_items.is_empty() {
-                app.left_state.select(None);
-            } else {
-                app.left_state.select(Some(0));
+        PendingKey::Fold => {
+            handle_fold(app, todo_list, code);
+            Vec::new()
+        }
+        PendingKey::Overdue => {
+            if code == KeyCode::Char('d') {
+                jump_to_next_overdue(app, todo_list);
             }
-            app.right_state.select(Some(0));
-        }
-        Focus::Right => {
-            if let Some(node) = selected_node(app) {
-                let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-                app.right_state.select((!refs.is_empty()).then_some(0));
-            }
+            Vec::new()
         }
     }
-}
-
-/// Handle typing in the live-filter mode.
-pub fn handle_filter(app: &mut AppState, todo_list: &TodoList, code: KeyCode) -> Result<()> {
-    match code {
-        KeyCode::Esc => {
-            remember_selection(app, todo_list);
-            clear_filter(app);
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Enter => {
-            app.filter_anchor = None;
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Backspace => {
-            let mut filter = app.filter.clone();
-            filter.pop();
-            app.set_filter(filter);
-        }
-        KeyCode::Char(character) => {
-            let mut filter = app.filter.clone();
-            filter.push(character);
-            app.set_filter(filter);
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn remember_selection(app: &mut AppState, todo_list: &TodoList) {
-    let node = selected_node(app);
-    let task = if app.focus == Focus::Right {
-        node.as_ref().and_then(|node| {
-            let refs = get_task_refs_filtered(todo_list, node, &app.filter_lower);
-            refs.get(app.right_state.selected().unwrap_or(0)).cloned()
-        })
-    } else {
-        None
-    };
-    app.filter_restore = Some(SelectionSnapshot { node, task });
-    app.filter_anchor = None;
-}
-
-fn clear_filter(app: &mut AppState) {
-    app.clear_filter();
 }
 
 fn handle_left(
     app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
+    todo_list: &TodoList,
     code: KeyCode,
-) -> Result<bool> {
+    count: usize,
+) -> Vec<Action> {
     match code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('j') | KeyCode::Down => move_left_down(app),
-        KeyCode::Char('k') | KeyCode::Up => move_left_up(app),
+        KeyCode::Char('q') => return vec![Action::Quit],
+        KeyCode::Char('j') | KeyCode::Down => move_left(app, count as isize),
+        KeyCode::Char('k') | KeyCode::Up => move_left(app, -(count as isize)),
         KeyCode::Char('l') | KeyCode::Tab | KeyCode::Enter => {
             if selected_node(app).is_some() {
                 app.focus = Focus::Right;
             }
         }
         KeyCode::Char('a' | 'A' | 'o' | 'O') => {
+            if let Some(node) = selected_node(app) {
+                app.folded.remove(&node);
+            }
             app.mode = Mode::InputSection(new_section_input(todo_list, app, code));
         }
         KeyCode::Char('i') => {
@@ -202,32 +159,78 @@ fn handle_left(
         KeyCode::Char('d') => app.pending = PendingKey::Delete,
         KeyCode::Char('g') => app.pending = PendingKey::Goto,
         KeyCode::Char('y') => app.pending = PendingKey::Yank,
-        KeyCode::Char('p') => paste_clipboard(app, todo_list, path, false)?,
-        KeyCode::Char('P') => paste_clipboard(app, todo_list, path, true)?,
+        KeyCode::Char('z') => app.pending = PendingKey::Fold,
+        KeyCode::Char(']') => app.pending = PendingKey::Overdue,
+        KeyCode::Char('p') => return vec![Action::Paste { above: false }],
+        KeyCode::Char('P') => return vec![Action::Paste { above: true }],
         KeyCode::Char('G') => move_left_bottom(app),
+        KeyCode::Char('J') | KeyCode::Char('K') => {
+            if let Some(path) = selected_node(app) {
+                let delta = if code == KeyCode::Char('J') { 1 } else { -1 };
+                return vec![Action::MoveSection { path, delta }];
+            }
+        }
+        KeyCode::Char('u') => return vec![Action::Undo],
+        KeyCode::Char('H') => toggle_hide_done(app),
         _ => {}
     }
-    Ok(false)
+    Vec::new()
 }
 
-fn move_left_down(app: &mut AppState) {
+fn handle_right(
+    app: &mut AppState,
+    todo_list: &TodoList,
+    code: KeyCode,
+    count: usize,
+) -> Vec<Action> {
+    match code {
+        KeyCode::Char('q') => return vec![Action::Quit],
+        KeyCode::Char('h') | KeyCode::Esc | KeyCode::Tab => app.focus = Focus::Left,
+        KeyCode::Char('j') | KeyCode::Down => move_right(app, todo_list, count as isize),
+        KeyCode::Char('k') | KeyCode::Up => move_right(app, todo_list, -(count as isize)),
+        KeyCode::Char(' ' | 'x') | KeyCode::Enter => {
+            if let Some(target) = current_task_ref(app, todo_list) {
+                return vec![Action::ToggleTask { target }];
+            }
+        }
+        KeyCode::Char('a' | 'o' | 'O' | 'A') => {
+            if let Some(node) = selected_node(app) {
+                app.folded.remove(&node);
+                app.mode = Mode::InputTask(new_task_input(app, node, code));
+            }
+        }
+        KeyCode::Char('i') => edit_task(app, todo_list),
+        KeyCode::Char('t') => edit_due(app, todo_list),
+        KeyCode::Char('d') => app.pending = PendingKey::Delete,
+        KeyCode::Char('g') => app.pending = PendingKey::Goto,
+        KeyCode::Char('y') => app.pending = PendingKey::Yank,
+        KeyCode::Char('z') => app.pending = PendingKey::Fold,
+        KeyCode::Char(']') => app.pending = PendingKey::Overdue,
+        KeyCode::Char('p') => return vec![Action::Paste { above: false }],
+        KeyCode::Char('P') => return vec![Action::Paste { above: true }],
+        KeyCode::Char('G') => move_right_bottom(app, todo_list),
+        KeyCode::Char('J') | KeyCode::Char('K') => {
+            if let Some(target) = current_task_ref(app, todo_list) {
+                let delta = if code == KeyCode::Char('J') { 1 } else { -1 };
+                return vec![Action::MoveTask { target, delta }];
+            }
+        }
+        KeyCode::Char('u') => return vec![Action::Undo],
+        KeyCode::Char('H') => toggle_hide_done(app),
+        _ => {}
+    }
+    Vec::new()
+}
+
+fn move_left(app: &mut AppState, delta: isize) {
     if app.tree_items.is_empty() {
         app.left_state.select(None);
         return;
     }
-    let current = app.left_state.selected().unwrap_or(0);
+    let current = app.left_state.selected().unwrap_or(0) as isize;
+    let max = app.tree_items.len().saturating_sub(1) as isize;
     app.left_state
-        .select(Some((current + 1).min(app.tree_items.len() - 1)));
-    app.right_state.select(Some(0));
-}
-
-fn move_left_up(app: &mut AppState) {
-    if app.tree_items.is_empty() {
-        app.left_state.select(None);
-        return;
-    }
-    let current = app.left_state.selected().unwrap_or(0);
-    app.left_state.select(Some(current.saturating_sub(1)));
+        .select(Some(current.saturating_add(delta).clamp(0, max) as usize));
     app.right_state.select(Some(0));
 }
 
@@ -238,6 +241,52 @@ fn move_left_bottom(app: &mut AppState) {
         app.left_state.select(Some(app.tree_items.len() - 1));
     }
     app.right_state.select(Some(0));
+}
+
+fn refs_for(app: &AppState, todo_list: &TodoList, node: &NodePath) -> Vec<TaskRef> {
+    get_task_refs_filtered(todo_list, node, &app.filter_lower, app.hide_done)
+}
+
+fn move_right(app: &mut AppState, todo_list: &TodoList, delta: isize) {
+    let Some(node) = selected_node(app) else {
+        app.right_state.select(None);
+        return;
+    };
+    let refs = refs_for(app, todo_list, &node);
+    if refs.is_empty() {
+        app.right_state.select(None);
+    } else {
+        let current = app.right_state.selected().unwrap_or(0) as isize;
+        let max = refs.len().saturating_sub(1) as isize;
+        app.right_state
+            .select(Some(current.saturating_add(delta).clamp(0, max) as usize));
+    }
+}
+
+fn move_right_bottom(app: &mut AppState, todo_list: &TodoList) {
+    let Some(node) = selected_node(app) else {
+        app.right_state.select(None);
+        return;
+    };
+    let refs = refs_for(app, todo_list, &node);
+    app.right_state
+        .select((!refs.is_empty()).then_some(refs.len() - 1));
+}
+
+fn jump_to_top(app: &mut AppState, todo_list: &TodoList) {
+    match app.focus {
+        Focus::Left => {
+            app.left_state
+                .select((!app.tree_items.is_empty()).then_some(0));
+            app.right_state.select(Some(0));
+        }
+        Focus::Right => {
+            if let Some(node) = selected_node(app) {
+                let refs = refs_for(app, todo_list, &node);
+                app.right_state.select((!refs.is_empty()).then_some(0));
+            }
+        }
+    }
 }
 
 fn new_section_input(todo_list: &TodoList, app: &AppState, code: KeyCode) -> SectionInput {
@@ -289,89 +338,6 @@ fn new_section_input(todo_list: &TodoList, app: &AppState, code: KeyCode) -> Sec
     }
 }
 
-fn handle_right(
-    app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
-    code: KeyCode,
-) -> Result<bool> {
-    match code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Char('h') | KeyCode::Esc | KeyCode::Tab => {
-            app.focus = Focus::Left;
-        }
-        KeyCode::Char('j') | KeyCode::Down => move_right_down(app, todo_list),
-        KeyCode::Char('k') | KeyCode::Up => move_right_up(app, todo_list),
-        KeyCode::Char(' ' | 'x') | KeyCode::Enter => toggle_task(app, todo_list, path)?,
-        KeyCode::Char('a' | 'o' | 'O' | 'A') => {
-            if let Some(node) = selected_node(app) {
-                app.mode = Mode::InputTask(new_task_input(app, node, code));
-            }
-        }
-        KeyCode::Char('i') => edit_task(app, todo_list),
-        KeyCode::Char('t') => edit_due(app, todo_list),
-        KeyCode::Char('d') => app.pending = PendingKey::Delete,
-        KeyCode::Char('g') => app.pending = PendingKey::Goto,
-        KeyCode::Char('y') => app.pending = PendingKey::Yank,
-        KeyCode::Char('p') => paste_clipboard(app, todo_list, path, false)?,
-        KeyCode::Char('P') => paste_clipboard(app, todo_list, path, true)?,
-        KeyCode::Char('G') => move_right_bottom(app, todo_list),
-        _ => {}
-    }
-    Ok(false)
-}
-
-fn move_right_down(app: &mut AppState, todo_list: &TodoList) {
-    let Some(node) = selected_node(app) else {
-        app.right_state.select(None);
-        return;
-    };
-    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-    if refs.is_empty() {
-        app.right_state.select(None);
-    } else {
-        let current = app.right_state.selected().unwrap_or(0);
-        app.right_state
-            .select(Some((current + 1).min(refs.len() - 1)));
-    }
-}
-
-fn move_right_up(app: &mut AppState, todo_list: &TodoList) {
-    let Some(node) = selected_node(app) else {
-        app.right_state.select(None);
-        return;
-    };
-    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-    if refs.is_empty() {
-        app.right_state.select(None);
-    } else {
-        let current = app.right_state.selected().unwrap_or(0);
-        app.right_state
-            .select(Some(current.saturating_sub(1).min(refs.len() - 1)));
-    }
-}
-
-fn move_right_bottom(app: &mut AppState, todo_list: &TodoList) {
-    let Some(node) = selected_node(app) else {
-        app.right_state.select(None);
-        return;
-    };
-    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
-    app.right_state
-        .select((!refs.is_empty()).then_some(refs.len() - 1));
-}
-
-fn toggle_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
-    let Some(reference) = current_task_ref(app, todo_list) else {
-        return Ok(());
-    };
-    let Some(task) = get_task_from_ref_mut(todo_list, &reference) else {
-        return Ok(());
-    };
-    task.is_done = !task.is_done;
-    write_file(path, todo_list)
-}
-
 fn new_task_input(app: &AppState, node: NodePath, code: KeyCode) -> TaskInput {
     let current = app.right_state.selected().unwrap_or(0);
     let (insert_idx, above) = match code {
@@ -397,13 +363,12 @@ fn edit_task(app: &mut AppState, todo_list: &TodoList) {
     let Some(task) = get_task_from_ref(todo_list, &reference) else {
         return;
     };
-    let text = task.text.clone();
     app.mode = Mode::InputTask(TaskInput {
         editing_idx: Some(current),
         insert_idx: None,
         above: false,
         node: reference.node,
-        field: TextField::new(text),
+        field: TextField::new(&task.text),
     });
 }
 
@@ -426,62 +391,18 @@ fn edit_due(app: &mut AppState, todo_list: &TodoList) {
 
 fn current_task_ref(app: &AppState, todo_list: &TodoList) -> Option<TaskRef> {
     let node = selected_node(app)?;
-    let refs = get_task_refs_filtered(todo_list, &node, &app.filter_lower);
+    let refs = refs_for(app, todo_list, &node);
     refs.get(app.right_state.selected().unwrap_or(0)).cloned()
 }
 
-fn delete_task(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
-    let Some(selected) = selected_node(app) else {
-        return Ok(());
-    };
-    let Some(reference) = current_task_ref(app, todo_list) else {
-        return Ok(());
-    };
-    let Some(task) = get_task_from_ref(todo_list, &reference).cloned() else {
-        return Ok(());
-    };
-    let Some(section) = get_node_mut(todo_list, &reference.node) else {
-        return Ok(());
-    };
-    section.tasks.remove(reference.task_idx);
-    app.clipboard = Some(ClipboardItem::Task(task));
-    write_file(path, todo_list)?;
-
-    let new_refs = get_task_refs_filtered(todo_list, &selected, &app.filter_lower);
-    if new_refs.is_empty() {
-        app.right_state.select(None);
-        app.focus = Focus::Left;
-    } else {
-        let current = app.right_state.selected().unwrap_or(0);
-        app.right_state
-            .select(Some(current.min(new_refs.len() - 1)));
-    }
-    Ok(())
-}
-
-fn delete_section(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+fn selected_task_targets(app: &AppState, todo_list: &TodoList, count: usize) -> Vec<TaskRef> {
     let Some(node) = selected_node(app) else {
-        return Ok(());
+        return Vec::new();
     };
-    let Some(removed) = remove_section(todo_list, &node) else {
-        return Ok(());
-    };
-    let removed_index = app.left_state.selected().unwrap_or(0);
-    app.clipboard = Some(ClipboardItem::Section(removed));
-    write_file(path, todo_list)?;
-
-    app.tree_items = build_visible_tree_items(todo_list, &Mode::Normal, &app.filter_lower);
-    if app.tree_items.is_empty() {
-        app.left_state.select(None);
-    } else {
-        let index = removed_index
-            .saturating_sub(1)
-            .min(app.tree_items.len() - 1);
-        app.left_state.select(Some(index));
-    }
-    app.right_state.select(None);
-    app.filter_anchor = None;
-    Ok(())
+    let refs = refs_for(app, todo_list, &node);
+    let start = app.right_state.selected().unwrap_or(0).min(refs.len());
+    let end = start.saturating_add(count).min(refs.len());
+    refs[start..end].to_vec()
 }
 
 fn yank_task(app: &mut AppState, todo_list: &TodoList) {
@@ -489,6 +410,7 @@ fn yank_task(app: &mut AppState, todo_list: &TodoList) {
         && let Some(task) = get_task_from_ref(todo_list, &reference)
     {
         app.clipboard = Some(ClipboardItem::Task(task.clone()));
+        app.set_info("yanked task");
     }
 }
 
@@ -497,455 +419,155 @@ fn yank_section(app: &mut AppState, todo_list: &TodoList) {
         && let Some(section) = get_node(todo_list, &node)
     {
         app.clipboard = Some(ClipboardItem::Section(section.clone()));
+        app.set_info("yanked section");
     }
 }
 
-/// Paste the clipboard below (`p`) or above (`P`) the current item.
-pub fn paste_clipboard(
-    app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
-    above: bool,
-) -> Result<()> {
-    let Some(clipboard) = app.clipboard.clone() else {
-        return Ok(());
-    };
-    match clipboard {
-        ClipboardItem::Task(task) => paste_task(app, todo_list, path, task, above),
-        ClipboardItem::Section(section) => paste_section(app, todo_list, path, section, above),
-    }
-}
-
-fn paste_task(
-    app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
-    task: crate::task::Task,
-    above: bool,
-) -> Result<()> {
-    let Some(selected) = selected_node(app) else {
-        return Ok(());
-    };
-    let refs = get_task_refs_filtered(todo_list, &selected, &app.filter_lower);
-    let current = app.right_state.selected().unwrap_or(0);
-
-    let (target_node, insert_index) = if app.focus == Focus::Right {
-        refs.get(current).map_or_else(
-            || (selected.clone(), task_count(todo_list, &selected)),
-            |reference| {
-                let base = reference.task_idx;
-                (reference.node.clone(), if above { base } else { base + 1 })
-            },
-        )
+fn toggle_hide_done(app: &mut AppState) {
+    app.hide_done = !app.hide_done;
+    app.set_info(if app.hide_done {
+        "hiding completed tasks"
     } else {
-        (
-            selected.clone(),
-            if above {
-                0
-            } else {
-                task_count(todo_list, &selected)
-            },
-        )
-    };
-
-    let Some(section) = get_node_mut(todo_list, &target_node) else {
-        return Ok(());
-    };
-    let insert_index = insert_index.min(section.tasks.len());
-    section.tasks.insert(insert_index, task);
-    write_file(path, todo_list)?;
-
-    app.tree_items = build_visible_tree_items(todo_list, &app.mode, &app.filter_lower);
-    if app.focus == Focus::Right {
-        let new_refs = get_task_refs_filtered(todo_list, &selected, &app.filter_lower);
-        if let Some(position) = new_refs.iter().position(|reference| {
-            reference.node.as_slice() == target_node.as_slice()
-                && reference.task_idx == insert_index
-        }) {
-            app.right_state.select(Some(position));
-        } else {
-            clamp_right_selection(app, new_refs.len());
-        }
-    }
-    Ok(())
+        "showing completed tasks"
+    });
 }
 
-fn paste_section(
-    app: &mut AppState,
-    todo_list: &mut TodoList,
-    path: &Path,
-    section: Section,
-    above: bool,
-) -> Result<()> {
-    let (parent, index, level) = match selected_node(app) {
-        Some(node) => {
-            let depth = node.len();
-            let level = node_level(todo_list, &node);
-            let parent = (depth > 1).then(|| node[..depth - 1].to_vec());
-            let index = if above {
-                node[depth - 1]
-            } else {
-                (node[depth - 1] + 1).min(child_count(todo_list, parent.as_ref()))
-            };
-            (parent, index, level)
+fn handle_fold(app: &mut AppState, todo_list: &TodoList, code: KeyCode) {
+    match code {
+        KeyCode::Char('a') => toggle_fold(app, todo_list),
+        KeyCode::Char('M') => {
+            let mut paths = HashSet::new();
+            collect_foldable(None, &todo_list.sections, &mut paths);
+            app.folded = paths;
+            app.set_info("folded all sections");
         }
-        None => (None, if above { 0 } else { todo_list.sections.len() }, 1),
-    };
-
-    let Some(new_path) = insert_section(todo_list, parent.as_ref(), index, section, level) else {
-        return Ok(());
-    };
-    write_file(path, todo_list)?;
-    app.mode = Mode::Normal;
-    app.tree_items = build_visible_tree_items(todo_list, &Mode::Normal, &app.filter_lower);
-    if let Some(position) = app
-        .tree_items
-        .iter()
-        .position(|item| matches!(item, crate::tui::state::TreeItem::Node(p) if p == &new_path))
-    {
-        app.left_state.select(Some(position));
-    } else {
-        clamp_left_selection(app);
+        KeyCode::Char('R') => {
+            app.folded.clear();
+            app.set_info("unfolded all sections");
+        }
+        _ => {}
     }
-    app.right_state.select(None);
-    Ok(())
 }
 
-fn sort_tasks_by_due(app: &mut AppState, todo_list: &mut TodoList, path: &Path) -> Result<()> {
+fn toggle_fold(app: &mut AppState, todo_list: &TodoList) {
     let Some(node) = selected_node(app) else {
-        return Ok(());
+        return;
     };
-    let Some(section) = get_node_mut(todo_list, &node) else {
-        return Ok(());
+    let Some(section) = get_node(todo_list, &node) else {
+        return;
     };
-    section
-        .tasks
-        .sort_by_key(|task| (task.due.is_none(), task.due));
-    write_file(path, todo_list)
+    if section.children.is_empty() {
+        app.set_info("section has no subsections");
+        return;
+    }
+    if !app.folded.remove(&node) {
+        app.folded.insert(node);
+        app.set_info("section folded");
+    } else {
+        app.set_info("section unfolded");
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::parser::parse_str;
-    use crate::task::TodoList;
-    use crate::tui::state::{Mode, TextField, TreeItem};
-    use crate::tui::tree::{build_tree_items, clamp_left_selection};
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn setup(content: &str) -> (NamedTempFile, AppState, TodoList) {
-        let mut file = NamedTempFile::new().unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-        file.flush().unwrap();
-        let list = parse_str(content);
-        let mut app = AppState::new(list.sections.len());
-        app.tree_items = build_tree_items(&list, &app.mode);
-        (file, app, list)
-    }
-
-    fn press(app: &mut AppState, list: &mut TodoList, file: &NamedTempFile, code: KeyCode) -> bool {
-        handle_normal(app, list, file.path(), code).unwrap()
-    }
-
-    fn select_path(app: &mut AppState, path: &[usize]) {
-        let position = app
-            .tree_items
-            .iter()
-            .position(|item| matches!(item, TreeItem::Node(p) if p.as_slice() == path))
-            .unwrap();
-        app.left_state.select(Some(position));
-    }
-
-    #[test]
-    fn pending_prefix_is_cleared_by_unrelated_key() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] Task\n");
-        assert!(!press(&mut app, &mut list, &file, KeyCode::Char('d')));
-        assert_eq!(app.pending, PendingKey::Delete);
-        assert!(!press(&mut app, &mut list, &file, KeyCode::Char('?')));
-        assert_eq!(app.pending, PendingKey::None);
-        assert_eq!(app.mode, Mode::Normal);
-    }
-
-    #[test]
-    fn pending_prefix_is_cleared_by_filter_key() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] Task\n");
-        press(&mut app, &mut list, &file, KeyCode::Char('g'));
-        press(&mut app, &mut list, &file, KeyCode::Char('/'));
-        assert_eq!(app.mode, Mode::Normal);
-        assert_eq!(app.pending, PendingKey::None);
-    }
-
-    #[test]
-    fn gg_and_g_move_within_bounds() {
-        let (file, mut app, mut list) = setup("# a\n# b\n# c\n");
-        press(&mut app, &mut list, &file, KeyCode::Char('G'));
-        assert_eq!(app.left_state.selected(), Some(2));
-        press(&mut app, &mut list, &file, KeyCode::Char('g'));
-        press(&mut app, &mut list, &file, KeyCode::Char('g'));
-        assert_eq!(app.left_state.selected(), Some(0));
-    }
-
-    #[test]
-    fn navigation_on_empty_document_clears_selection() {
-        let (file, mut app, mut list) = setup("");
-        press(&mut app, &mut list, &file, KeyCode::Char('j'));
-        assert!(app.left_state.selected().is_none());
-        press(&mut app, &mut list, &file, KeyCode::Char('G'));
-        assert!(app.left_state.selected().is_none());
-    }
-
-    #[test]
-    fn section_add_operations_target_requested_levels() {
-        let (file, mut app, mut list) = setup("# main\n## sub\n");
-
-        select_path(&mut app, &[0]);
-        press(&mut app, &mut list, &file, KeyCode::Char('a'));
-        match &app.mode {
-            Mode::InputSection(input) => {
-                assert_eq!(input.parent.as_deref(), Some([0].as_slice()));
-                assert_eq!(input.insert_idx, Some(0));
-                assert_eq!(input.level, 2);
-            }
-            other => panic!("expected section input, got {other:?}"),
-        }
-
-        app.mode = Mode::Normal;
-        select_path(&mut app, &[0, 0]);
-        press(&mut app, &mut list, &file, KeyCode::Char('a'));
-        match &app.mode {
-            Mode::InputSection(input) => assert_eq!(input.level, 3),
-            other => panic!("expected section input, got {other:?}"),
-        }
-
-        app.mode = Mode::Normal;
-        press(&mut app, &mut list, &file, KeyCode::Char('o'));
-        match &app.mode {
-            Mode::InputSection(input) => {
-                assert_eq!(input.parent.as_deref(), Some([0].as_slice()));
-                assert_eq!(input.insert_idx, Some(1));
-                assert_eq!(input.level, 2);
-            }
-            other => panic!("expected section input, got {other:?}"),
+fn collect_foldable(parent: Option<&NodePath>, children: &[Section], out: &mut HashSet<NodePath>) {
+    for (index, child) in children.iter().enumerate() {
+        let mut path = parent.map_or_else(Vec::new, Clone::clone);
+        path.push(index);
+        if !child.children.is_empty() {
+            out.insert(path.clone());
+            collect_foldable(Some(&path), &child.children, out);
         }
     }
+}
 
-    #[test]
-    fn capital_operations_move_one_structural_level() {
-        let (file, mut app, mut list) = setup("# main\n## sub\n");
-        select_path(&mut app, &[0, 0]);
-
-        press(&mut app, &mut list, &file, KeyCode::Char('A'));
-        match &app.mode {
-            Mode::InputSection(input) => {
-                assert!(input.parent.is_none());
-                assert_eq!(input.insert_idx, Some(0));
-                assert_eq!(input.level, 1);
-            }
-            other => panic!("expected section input, got {other:?}"),
-        }
-
-        app.mode = Mode::Normal;
-        select_path(&mut app, &[0, 0]);
-        press(&mut app, &mut list, &file, KeyCode::Char('O'));
-        match &app.mode {
-            Mode::InputSection(input) => {
-                assert_eq!(input.parent.as_deref(), Some([0].as_slice()));
-                assert_eq!(input.insert_idx, Some(0));
-                assert_eq!(input.level, 2);
-            }
-            other => panic!("expected section input, got {other:?}"),
+fn jump_to_next_overdue(app: &mut AppState, todo_list: &TodoList) {
+    let Some(node) = selected_node(app) else {
+        return;
+    };
+    let refs = refs_for(app, todo_list, &node);
+    if refs.is_empty() {
+        app.set_info("no overdue tasks");
+        return;
+    }
+    let current = app.right_state.selected().unwrap_or(0);
+    let mut found = None;
+    for step in 1..=refs.len() {
+        let index = (current + step) % refs.len();
+        if get_task_from_ref(todo_list, &refs[index])
+            .is_some_and(|task| !task.is_done && task.due.is_some_and(|due| due < app.today))
+        {
+            found = Some(index);
+            break;
         }
     }
-
-    #[test]
-    fn delete_section_yanks_and_keeps_selection_valid() {
-        let (file, mut app, mut list) = setup("# a\n## a1\n# b\n");
-        select_path(&mut app, &[0, 0]);
-        press(&mut app, &mut list, &file, KeyCode::Char('d'));
-        press(&mut app, &mut list, &file, KeyCode::Char('d'));
-
-        assert!(matches!(app.clipboard, Some(ClipboardItem::Section(_))));
-        assert_eq!(list.sections.len(), 2);
-        assert!(list.sections[0].children.is_empty());
-        assert!(
-            app.left_state
-                .selected()
-                .is_some_and(|i| i < app.tree_items.len())
-        );
-    }
-
-    #[test]
-    fn delete_last_task_clears_right_selection_and_focus() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] only\n");
+    if let Some(index) = found {
         app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-        press(&mut app, &mut list, &file, KeyCode::Char('d'));
-        press(&mut app, &mut list, &file, KeyCode::Char('d'));
-
-        assert!(list.sections[0].tasks.is_empty());
-        assert_eq!(app.right_state.selected(), None);
-        assert_eq!(app.focus, Focus::Left);
-        let reparsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        assert!(reparsed.sections[0].tasks.is_empty());
+        app.right_state.select(Some(index));
+        app.set_info("next overdue task");
+    } else {
+        app.set_info("no overdue tasks");
     }
+}
 
-    #[test]
-    fn yank_and_paste_task_above_and_below() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] A\n- [ ] B\n");
-        app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-        press(&mut app, &mut list, &file, KeyCode::Char('y'));
-        press(&mut app, &mut list, &file, KeyCode::Char('y'));
-        press(&mut app, &mut list, &file, KeyCode::Char('p'));
+fn remember_selection(app: &mut AppState, todo_list: &TodoList) {
+    let node = selected_node(app);
+    let task = if app.focus == Focus::Right {
+        node.as_ref().and_then(|node| {
+            let refs = refs_for(app, todo_list, node);
+            refs.get(app.right_state.selected().unwrap_or(0)).cloned()
+        })
+    } else {
+        None
+    };
+    app.filter_restore = Some(SelectionSnapshot { node, task });
+    app.filter_anchor = None;
+}
 
-        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        assert_eq!(parsed.sections[0].tasks.len(), 3);
-        assert_eq!(parsed.sections[0].tasks[1].text, "A");
-
-        app.right_state.select(Some(1));
-        press(&mut app, &mut list, &file, KeyCode::Char('P'));
-        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        assert_eq!(parsed.sections[0].tasks.len(), 4);
-        assert_eq!(parsed.sections[0].tasks[1].text, "A");
-    }
-
-    #[test]
-    fn yank_and_paste_section() {
-        let (file, mut app, mut list) = setup("# main\n# clz\n");
-        select_path(&mut app, &[0]);
-        press(&mut app, &mut list, &file, KeyCode::Char('y'));
-        press(&mut app, &mut list, &file, KeyCode::Char('y'));
-        select_path(&mut app, &[1]);
-        press(&mut app, &mut list, &file, KeyCode::Char('p'));
-
-        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        assert_eq!(parsed.sections.len(), 3);
-        assert_eq!(parsed.sections[2].name, "main");
-    }
-
-    #[test]
-    fn delete_task_while_filtered_deletes_the_visible_task() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] keep\n- [ ] remove\n");
-        app.filter = "remove".into();
-        app.filter_lower = "remove".into();
-        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, &app.filter_lower);
-        app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-
-        press(&mut app, &mut list, &file, KeyCode::Char('d'));
-        press(&mut app, &mut list, &file, KeyCode::Char('d'));
-
-        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        assert_eq!(parsed.sections[0].tasks.len(), 1);
-        assert_eq!(parsed.sections[0].tasks[0].text, "keep");
-    }
-
-    #[test]
-    fn toggle_task_writes_immediately() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] A\n");
-        app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-        press(&mut app, &mut list, &file, KeyCode::Char('x'));
-        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        assert!(parsed.sections[0].tasks[0].is_done);
-    }
-
-    #[test]
-    fn sort_orders_dated_tasks_first() {
-        let (file, mut app, mut list) =
-            setup("# main\n- [ ] C due:2025-12-01\n- [ ] A due:2025-01-15\n- [ ] B\n");
-        app.focus = Focus::Right;
-        press(&mut app, &mut list, &file, KeyCode::Char(':'));
-        let parsed = parse_str(&std::fs::read_to_string(file.path()).unwrap());
-        let texts: Vec<_> = parsed.sections[0]
-            .tasks
-            .iter()
-            .map(|task| task.text.as_str())
-            .collect();
-        assert_eq!(texts, ["A", "C", "B"]);
-    }
-
-    #[test]
-    fn filter_esc_restores_selection_and_clears_text() {
-        let (_file, mut app, list) = setup("# main\n## sub1\n- [ ] A\n## sub2\n- [ ] B\n");
-        app.tree_items = build_visible_tree_items(&list, &Mode::Normal, "");
-        select_path(&mut app, &[0, 0]);
-        app.mode = Mode::Filter;
-        app.filter_anchor = Some(vec![0, 0]);
-        app.filter = "sub".into();
-        app.filter_lower = "sub".into();
-
-        handle_filter(&mut app, &list, KeyCode::Esc).unwrap();
-
-        assert!(app.filter.is_empty());
-        assert_eq!(app.mode, Mode::Normal);
-        let snapshot = app.filter_restore.as_ref().unwrap();
-        assert!(snapshot.node.is_some());
-    }
-
-    #[test]
-    fn filter_typing_keeps_selection_valid_after_rebuild() {
-        let (_file, mut app, list) = setup("# main\n## sub1\n- [ ] A\n## sub2\n- [ ] B\n");
-        select_path(&mut app, &[0, 0]);
-        app.mode = Mode::Filter;
-        app.filter_anchor = Some(vec![0, 0]);
-        handle_filter(&mut app, &list, KeyCode::Char('z')).unwrap();
-        app.tree_items = build_visible_tree_items(&list, &app.mode, &app.filter_lower);
-        if app.tree_items.is_empty() {
-            app.left_state.select(None);
-        } else {
-            app.left_state.select(Some(
-                app.left_state
-                    .selected()
-                    .unwrap_or(0)
-                    .min(app.tree_items.len() - 1),
-            ));
+/// Handle typing in the live-filter mode.
+pub fn handle_filter(app: &mut AppState, todo_list: &TodoList, code: KeyCode) -> Vec<Action> {
+    match code {
+        KeyCode::Esc => {
+            remember_selection(app, todo_list);
+            app.clear_filter();
+            app.mode = Mode::Normal;
         }
-        clamp_left_selection(&mut app);
-        assert!(
-            app.left_state
-                .selected()
-                .is_none_or(|i| i < app.tree_items.len())
-        );
-    }
-
-    #[test]
-    fn right_panel_input_modes_capture_targets() {
-        let (file, mut app, mut list) = setup("# main\n- [ ] A due:2025-01-15\n");
-        app.focus = Focus::Right;
-        app.right_state.select(Some(0));
-
-        press(&mut app, &mut list, &file, KeyCode::Char('i'));
-        match &app.mode {
-            Mode::InputTask(input) => {
-                assert_eq!(input.editing_idx, Some(0));
-                assert_eq!(input.field.buf, "A");
-            }
-            other => panic!("expected task input, got {other:?}"),
+        KeyCode::Enter => {
+            app.filter_anchor = None;
+            app.mode = Mode::Normal;
         }
-
-        app.mode = Mode::Normal;
-        press(&mut app, &mut list, &file, KeyCode::Char('t'));
-        match &app.mode {
-            Mode::InputDue(input) => {
-                assert_eq!(input.target.task_idx, 0);
-                assert_eq!(input.field.buf, "2025-01-15");
-            }
-            other => panic!("expected due input, got {other:?}"),
+        KeyCode::Backspace => {
+            let mut filter = app.filter.clone();
+            filter.pop();
+            app.set_filter(filter);
         }
-
-        app.mode = Mode::Normal;
-        press(&mut app, &mut list, &file, KeyCode::Char('O'));
-        match &app.mode {
-            Mode::InputTask(input) => assert!(input.above),
-            other => panic!("expected task input, got {other:?}"),
+        KeyCode::Char(character) => {
+            let mut filter = app.filter.clone();
+            filter.push(character);
+            app.set_filter(filter);
         }
+        _ => {}
     }
+    Vec::new()
+}
 
-    #[test]
-    fn text_field_is_used_for_new_tasks() {
-        let field = TextField::new("é");
-        assert_eq!(field.cursor, 1);
+/// Handle keys while the help overlay is open.
+pub fn handle_help(app: &mut AppState, code: KeyCode) -> Vec<Action> {
+    match code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Char('/') => {
+            app.filter_anchor = None;
+            app.left_state.select(Some(0));
+            app.right_state.select(Some(0));
+            app.mode = Mode::Filter;
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.help_scroll = app.help_scroll.saturating_add(1);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+        }
+        _ => {}
     }
+    Vec::new()
 }

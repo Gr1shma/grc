@@ -50,8 +50,14 @@ pub fn get_task_refs_filtered(
     todo_list: &TodoList,
     node: &NodePath,
     filter_lower: &str,
+    hide_done: bool,
 ) -> Vec<TaskRef> {
-    let refs = get_task_refs(todo_list, node);
+    let mut refs = get_task_refs(todo_list, node);
+    if hide_done {
+        refs.retain(|task_ref| {
+            get_task_from_ref(todo_list, task_ref).is_some_and(|task| !task.is_done)
+        });
+    }
     if filter_lower.is_empty() {
         return refs;
     }
@@ -170,15 +176,15 @@ mod tests {
 
     #[test]
     fn filter_by_task_text() {
-        let refs = get_task_refs_filtered(&sample(), &vec![0], "milk");
+        let refs = get_task_refs_filtered(&sample(), &vec![0], "milk", false);
         assert!(refs.is_empty());
-        let refs = get_task_refs_filtered(&sample(), &vec![1], "milk");
+        let refs = get_task_refs_filtered(&sample(), &vec![1], "milk", false);
         assert_eq!(refs.len(), 1);
     }
 
     #[test]
     fn filter_by_breadcrumb() {
-        let refs = get_task_refs_filtered(&sample(), &vec![0], "backend");
+        let refs = get_task_refs_filtered(&sample(), &vec![0], "backend", false);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].node, vec![0, 0]);
         assert_eq!(refs[1].node, vec![0, 0, 0]);
@@ -186,9 +192,9 @@ mod tests {
 
     #[test]
     fn matching_section_keeps_all_tasks() {
-        let refs = get_task_refs_filtered(&sample(), &vec![0], "work");
+        let refs = get_task_refs_filtered(&sample(), &vec![0], "work", false);
         assert_eq!(refs.len(), 4);
-        let refs = get_task_refs_filtered(&sample(), &vec![0, 0], "backend");
+        let refs = get_task_refs_filtered(&sample(), &vec![0, 0], "backend", false);
         assert_eq!(refs.len(), 1);
     }
 

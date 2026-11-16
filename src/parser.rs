@@ -13,8 +13,35 @@ use crate::task::{LineEnding, NodePath, Section, Task, TodoList, get_node_mut};
 use anyhow::{Context, Result};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Cheap fingerprint used to notice external edits.
+///
+/// Modification time is the primary signal; length catches same-timestamp
+/// replacements on file systems with coarse mtime resolution.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileStamp {
+    /// Last modification time, when the platform reports one.
+    pub modified: Option<SystemTime>,
+    /// File length in bytes.
+    pub len: u64,
+}
+
+impl FileStamp {
+    /// Read the current stamp, or `None` when the path does not exist.
+    pub fn read(path: &Path) -> Result<Option<Self>> {
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(Some(Self {
+                modified: metadata.modified().ok(),
+                len: metadata.len(),
+            })),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error)
+                .with_context(|| format!("Failed to inspect todo file: {}", path.display())),
+        }
+    }
+}
 
 /// Read and parse a Markdown file.
 pub fn parse_file(path: &Path) -> Result<TodoList> {
@@ -126,13 +153,34 @@ pub fn to_markdown(list: &TodoList) -> String {
 
 /// Atomically write a todo list to `path`.
 ///
-/// The content is written to a uniquely named temporary file in the same
-/// directory, flushed, and renamed over the destination. A failure removes the
-/// temporary file and leaves the original untouched.
+/// A symlink is resolved first, so saving a dotfiles setup updates the link
+/// target and never replaces the link itself. The content is written to a
+/// uniquely named temporary file next to the target, flushed, and renamed over
+/// that target. A failure removes the temporary file and leaves the original
+/// untouched.
 pub fn write_file(path: &Path, list: &TodoList) -> Result<()> {
+    let target = write_target(path)?;
     let content = to_markdown(list);
-    atomic_write(path, content.as_bytes())
+    atomic_write(&target, content.as_bytes())
         .with_context(|| format!("Failed to write todo file: {}", path.display()))
+}
+
+fn write_target(path: &Path) -> Result<PathBuf> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            fs::canonicalize(path).with_context(|| {
+                format!(
+                    "Refusing to replace symlink with a regular file: {}",
+                    path.display()
+                )
+            })
+        }
+        Ok(_) => Ok(path.to_path_buf()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path.to_path_buf()),
+        Err(error) => {
+            Err(error).with_context(|| format!("Failed to inspect todo file: {}", path.display()))
+        }
+    }
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -591,5 +639,47 @@ Trailing text
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".grc_"))
             .count();
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn file_stamp_tracks_creation_changes_and_removal() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("todo.md");
+        assert_eq!(FileStamp::read(&path).unwrap(), None);
+
+        fs::write(&path, "short").unwrap();
+        let first = FileStamp::read(&path).unwrap().unwrap();
+        assert_eq!(first.len, 5);
+
+        fs::write(&path, "a longer body").unwrap();
+        let second = FileStamp::read(&path).unwrap().unwrap();
+        assert_ne!(first, second);
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(FileStamp::read(&path).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_symlink_updates_target_and_keeps_link() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let target = directory.path().join("dotfile.md");
+        let link = directory.path().join("todo.md");
+        fs::write(&target, "# old\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let list = parse_str("# new\n- [ ] Task\n");
+        write_file(&link, &list).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), to_markdown(&list));
+        assert_eq!(fs::read_link(&link).unwrap(), target);
     }
 }
