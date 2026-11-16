@@ -7,7 +7,7 @@ use crate::task::{NodePath, Section, TodoList, get_node};
 use crate::tui::actions::Action;
 use crate::tui::state::{
     AppState, ClipboardItem, Focus, Mode, PendingKey, SectionInput, SelectionSnapshot, TaskInput,
-    TextField,
+    TextField, TreeItem,
 };
 use crate::tui::task_ref::{TaskRef, get_task_from_ref, get_task_refs_filtered};
 use crate::tui::tree::{node_level, node_name, selected_node};
@@ -481,32 +481,66 @@ fn collect_foldable(parent: Option<&NodePath>, children: &[Section], out: &mut H
 }
 
 fn jump_to_next_overdue(app: &mut AppState, todo_list: &TodoList) {
-    let Some(node) = selected_node(app) else {
-        return;
-    };
-    let refs = refs_for(app, todo_list, &node);
+    let refs = visible_tasks_in_document_order(app, todo_list);
     if refs.is_empty() {
         app.set_info("no overdue tasks");
         return;
     }
-    let current = app.right_state.selected().unwrap_or(0);
-    let mut found = None;
-    for step in 1..=refs.len() {
-        let index = (current + step) % refs.len();
-        if get_task_from_ref(todo_list, &refs[index])
-            .is_some_and(|task| !task.is_done && task.due.is_some_and(|due| due < app.today))
-        {
-            found = Some(index);
-            break;
-        }
-    }
-    if let Some(index) = found {
-        app.focus = Focus::Right;
-        app.right_state.select(Some(index));
-        app.set_info("next overdue task");
-    } else {
+
+    let current = current_task_ref(app, todo_list).and_then(|current| {
+        refs.iter().position(|reference| {
+            reference.node == current.node && reference.task_idx == current.task_idx
+        })
+    });
+    let start = current.map_or(0, |position| position + 1);
+    let found = (0..refs.len())
+        .map(|step| (start + step) % refs.len())
+        .find(|index| {
+            get_task_from_ref(todo_list, &refs[*index])
+                .is_some_and(|task| !task.is_done && task.due.is_some_and(|due| due < app.today))
+        });
+    let Some(index) = found else {
         app.set_info("no overdue tasks");
+        return;
+    };
+
+    let target = refs[index].clone();
+    app.focus = Focus::Right;
+    if let Some(row) = app
+        .tree_items
+        .iter()
+        .position(|item| matches!(item, TreeItem::Node(path) if path == &target.node))
+    {
+        app.left_state.select(Some(row));
     }
+    let row = refs_for(app, todo_list, &target.node)
+        .iter()
+        .position(|reference| {
+            reference.node == target.node && reference.task_idx == target.task_idx
+        });
+    app.right_state.select(row);
+    app.set_info("next overdue task");
+}
+
+/// Every visible task in document order, including sections other than the
+/// selected one.
+///
+/// `get_task_refs_filtered` already flattens descendants for a top-level
+/// section, so each node contributes only the tasks it owns; otherwise a nested
+/// task would appear once per ancestor.
+fn visible_tasks_in_document_order(app: &AppState, todo_list: &TodoList) -> Vec<TaskRef> {
+    let mut refs = Vec::new();
+    for item in &app.tree_items {
+        let TreeItem::Node(path) = item else {
+            continue;
+        };
+        refs.extend(
+            refs_for(app, todo_list, path)
+                .into_iter()
+                .filter(|reference| reference.node == *path),
+        );
+    }
+    refs
 }
 
 fn remember_selection(app: &mut AppState, todo_list: &TodoList) {

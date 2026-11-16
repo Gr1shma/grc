@@ -666,6 +666,35 @@ mod tests {
     }
 
     #[test]
+    fn next_overdue_searches_the_whole_document() {
+        let today = NaiveDate::from_ymd_opt(2025, 7, 21).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let content = format!(
+            "# first\n- [ ] nothing due\n# second\n- [ ] late due:{}\n",
+            yesterday.format("%Y-%m-%d"),
+        );
+        let (_dir, mut engine) = engine(&content);
+        engine.app.today = today;
+        engine.refresh();
+        engine.app.focus = Focus::Right;
+        engine.app.right_state.select(Some(0));
+
+        press(&mut engine, KeyCode::Char(']'));
+        press(&mut engine, KeyCode::Char('d'));
+        assert_eq!(
+            crate::tui::tree::selected_node(&engine.app),
+            Some(vec![1]),
+            "the overdue task lives in another section"
+        );
+        assert_eq!(engine.app.right_state.selected(), Some(0));
+        assert_eq!(engine.app.focus, Focus::Right);
+        assert_eq!(
+            engine.app.message.as_ref().unwrap().text,
+            "next overdue task"
+        );
+    }
+
+    #[test]
     fn shift_j_and_k_reorder_tasks_and_sections() {
         let (_dir, mut engine) = engine("# a\n- [ ] A\n- [ ] B\n# b\n- [ ] Bb\n");
         engine.app.focus = Focus::Right;
