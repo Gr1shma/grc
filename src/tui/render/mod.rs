@@ -764,6 +764,42 @@ mod tests {
         }
     }
 
+    /// With only sixteen ANSI shades there is no second tint for an unfocused
+    /// panel, so the focused bar carries black text and every other mark is
+    /// either the gutter glyph or bold — never a shade a terminal is free to
+    /// render differently from xterm.
+    #[test]
+    fn the_ansi_palette_marks_the_selection_without_a_second_shade() {
+        let (todo, mut app) = selection_state();
+        app.right_state.select(Some(1));
+        let theme = Theme::ansi16(false, false);
+        let buffer = cells(72, 14, &todo, &app, &theme);
+        let [left, right] = panel_split(Rect::new(0, 0, 72, 12));
+        let inside = |panel: Rect| (panel.x + 1)..(panel.x + panel.width - 1);
+
+        for x in inside(right) {
+            let cell = &buffer[(x, 2)];
+            assert_eq!(cell.bg, Color::DarkGray, "({x},2) is not on the bar");
+            assert!(cell.modifier.contains(Modifier::BOLD));
+            if !cell.symbol().trim().is_empty() {
+                assert!(
+                    ratio(cell.fg, cell.bg) >= TEXT_MIN,
+                    "({x},2) {:?} on {:?} is unreadable",
+                    cell.fg,
+                    cell.bg
+                );
+            }
+        }
+        assert_eq!(buffer[(right.x + 1, 2)].symbol(), "▌");
+
+        for x in inside(left) {
+            let cell = &buffer[(x, 1)];
+            assert_eq!(cell.bg, Color::Reset, "({x},1) painted a second bar");
+            assert!(cell.modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buffer[(left.x + 1, 1)].symbol(), "▌");
+    }
+
     const NO_COLOUR: &str = include_str!("snapshots/no_colour.txt");
 
     #[test]

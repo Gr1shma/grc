@@ -117,6 +117,7 @@ fn help_content(theme: &Theme) -> Vec<Line<'static>> {
             ("r / o", "reload / overwrite on conflict"),
             ("wheel / click", "move selection / select a row"),
             ("NO_COLOR=1", "disable colour"),
+            ("GRC_BG=1", "paint the dark canvas"),
             ("GRC_ASCII=1", "ASCII checkboxes and folds"),
         ],
     );
